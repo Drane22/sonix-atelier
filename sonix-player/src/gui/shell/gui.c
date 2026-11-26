@@ -14,6 +14,8 @@
 #include "src/gui/nowplaying/chapters.h"
 #include "src/gui/nowplaying/lyricsearch.h"
 #include "src/gui/wireless/airplay.h"
+#include "src/gui/arcade/arcade_shell.h"
+#include "src/gui/arcade/gameshub.h"
 #include "src/gui/bluetooth/airpodspage.h"
 #include "src/gui/settings/appearance.h"
 #include "src/gui/bluetooth/btaudio.h"
@@ -577,6 +579,11 @@ static void power_menu_async_cb(void *unused) {
 void gui_notify_power_menu(void) { gui_post(power_menu_async_cb, NULL); }
 
 
+static bool prepare_sleep_screen(void) {
+	bool paused = !power_screen_is_on() && arcade_shell_pause_for_screen_off();
+	return screensaver_prepare() || paused;
+}
+
 void gui_init(gui_config_t *cfg) {
 	// Colours first: every screen below styles itself from the active palette.
 	theme_init();
@@ -629,6 +636,7 @@ void gui_init(gui_config_t *cfg) {
 	dlna_screen = lv_obj_create(NULL);
 	sonixlink_screen = lv_obj_create(NULL);
 	morepage_screen = lv_obj_create(NULL);
+	games_screen = lv_obj_create(NULL);
 	filespage_screen = lv_obj_create(NULL);
 	textview_screen = lv_obj_create(NULL);
 	imageview_screen = lv_obj_create(NULL);
@@ -682,6 +690,7 @@ void gui_init(gui_config_t *cfg) {
 	gearboysettings_init(cfg); // before the page: its gear opens this
 	gearboypage_init(cfg);
 	flappybird_init(cfg);
+	gameshub_init(cfg);
 	metronomepage_init(cfg);
 	// before morepage: the books tile opens the shelf, and the shelf opens the
 	// reader.
@@ -741,7 +750,7 @@ void gui_init(gui_config_t *cfg) {
 		// only way out of it.
 		medialist_tracks_screen, medialist_albums_screen, audiobooks_screen, wireless_screen,
 		streaming_screen,		 radiopage_screen,	radiolist_screen,	radiosearch_screen,
-		morepage_screen,
+		morepage_screen,		 games_screen,
 	};
 	for (size_t i = 0; i < sizeof(player_swipe_screens) / sizeof(player_swipe_screens[0]); i++) {
 		player_sheet_attach_drag(player_swipe_screens[i], true);
@@ -762,7 +771,7 @@ void gui_init(gui_config_t *cfg) {
 		wifisettings_screen,
 		btsettings_screen, btaudio_screen,	 airpodspage_screen, airplay_screen,   streaming_screen,
 		radiopage_screen,  radiolist_screen, radiosearch_screen,
-		dlna_screen,	   sonixlink_screen,	 morepage_screen,	  gearboypage_screen, metronomepage_screen,
+		dlna_screen,	   sonixlink_screen,	 morepage_screen,	  games_screen,		gearboypage_screen, metronomepage_screen,
 	};
 	for (size_t i = 0; i < sizeof(back_swipe_screens) / sizeof(back_swipe_screens[0]); i++) {
 		switcher_attach_back_gesture(back_swipe_screens[i]);
@@ -779,7 +788,7 @@ void gui_init(gui_config_t *cfg) {
 	// on it rather than on the page) and when it lights up again; and the
 	// player tells it to let go of the artwork before freeing it, because a
 	// track can change while the screensaver sits behind a blanked panel.
-	power_set_wake_hook(screensaver_prepare);
+	power_set_wake_hook(prepare_sleep_screen);
 	player_set_cover_release_cb(screensaver_release_artwork);
 
 	// The notice card: the interface's card style, wrapping, and only as tall
@@ -862,11 +871,22 @@ void gui_init(gui_config_t *cfg) {
 	// Ahead of everything else, and only on a device that has never been booted:
 	// the greeting. Its button opens the language picker itself, which in turn
 	// opens the clock, so only the first door is entered from here.
-	if (language_needed()) {
+	bool lang_needed = language_needed();
+	bool ts_needed = timeset_needed();
+	void gui_set_first_boot_flag(bool v);
+	gui_set_first_boot_flag(lang_needed || ts_needed);
+
+	if (lang_needed) {
 		welcome_show_first_boot();
-	} else if (timeset_needed()) {
+	} else if (ts_needed) {
 		timeset_show();
 	}
 
 	switch_screen(main_menu_screen);
 }
+
+static bool first_boot_flag;
+
+void gui_set_first_boot_flag(bool v) { first_boot_flag = v; }
+
+bool gui_first_boot_active(void) { return first_boot_flag; }

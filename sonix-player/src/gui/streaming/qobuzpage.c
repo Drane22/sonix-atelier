@@ -1798,8 +1798,8 @@ static void paint_search_pills(void) {
 	for (int i = 0; i < 3; i++) {
 		bool on = i == search_kind_index;
 		lv_obj_set_style_bg_color(search_pills[i], on ? theme()->accent : theme()->surface_pressed, 0);
-		lv_obj_set_style_text_color(lv_obj_get_child(search_pills[i], 0), on ? lv_color_white() : theme()->text_primary,
-									0);
+		lv_obj_set_style_text_color(lv_obj_get_child(search_pills[i], 0),
+									on ? theme()->accent_ink : theme()->text_primary, 0);
 	}
 }
 
@@ -2125,8 +2125,8 @@ static void quality_refresh(void) {
 		}
 		bool on = QUALITY_VALUES[i] == current;
 		lv_obj_set_style_bg_color(quality_pills[i], on ? theme()->accent : theme()->surface_pressed, 0);
-		lv_obj_set_style_text_color(lv_obj_get_child(quality_pills[i], 0), on ? lv_color_white() : theme()->text_primary,
-									0);
+		lv_obj_set_style_text_color(lv_obj_get_child(quality_pills[i], 0),
+									on ? theme()->accent_ink : theme()->text_primary, 0);
 	}
 }
 

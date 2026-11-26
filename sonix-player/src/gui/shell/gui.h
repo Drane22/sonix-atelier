@@ -21,6 +21,7 @@ typedef struct {
 #define VOLUME_WARN_COLOR lv_color_make(224, 60, 50)
 
 void gui_init(gui_config_t *cfg);
+bool gui_first_boot_active(void);
 
 // The bridge from any thread to the UI thread: `cb(user)` runs on the UI
 // thread within a few tens of milliseconds.

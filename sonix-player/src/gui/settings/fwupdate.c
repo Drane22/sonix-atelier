@@ -46,7 +46,7 @@ static action_fn button_actions[BUTTONS];
 static lv_timer_t *poll_timer;
 static bool holding_screen;
 
-static enum { PHASE_NONE, PHASE_CHECK, PHASE_DOWNLOAD } phase;
+static enum { PHASE_NONE, PHASE_CHECK, PHASE_DOWNLOAD, PHASE_VERIFY } phase;
 
 static char notes_line[4096];
 
@@ -182,7 +182,7 @@ static void set_button(int i, const char *key, bool accent, action_fn action) {
 	}
 
 	lv_label_set_text(button_labels[i], tr(key));
-	lv_obj_set_style_text_color(button_labels[i], accent ? lv_color_white() : theme()->text_primary, 0);
+	lv_obj_set_style_text_color(button_labels[i], accent ? theme()->accent_ink : theme()->text_primary, 0);
 	button_actions[i] = action;
 	lv_obj_set_hidden(btn, false);
 }
@@ -543,9 +543,8 @@ static void show_release(void) {
 
 static void install_cb(lv_timer_t *timer) {
 	(void)timer;
-	firmware_update_start();
-	// Returns only on the host build.
-	close_card();
+	if (firmware_update_start()) close_card();
+	else show_notice(tr("system_update_corrupt"));
 }
 
 static void show_installing(void) {
@@ -578,10 +577,26 @@ static void check_finished(ota_result_t r) {
 	}
 }
 
+static void verify_from_card(void) {
+	char path[512];
+	if (!firmware_update_file_find(path, sizeof(path))) {
+		show_notice(tr("system_update_file_missing"));
+		return;
+	}
+	if (!firmware_verify_start(path)) {
+		show_notice(tr("system_update_corrupt"));
+		return;
+	}
+	phase = PHASE_VERIFY;
+	layout(PRODUCT_NAME, tr("system_update_checking"), false, false);
+	hide_buttons(0);
+	start_polling();
+}
+
 static void download_finished(ota_result_t r) {
 	switch (r) {
 	case OTA_OK:
-		show_installing();
+		verify_from_card();
 		break;
 	case OTA_NO_CARD:
 		show_notice(tr("system_no_card"));
@@ -603,6 +618,15 @@ static void download_finished(ota_result_t r) {
 
 static void poll_cb(lv_timer_t *timer) {
 	(void)timer;
+	if (phase == PHASE_VERIFY) {
+		firmware_verify_state_t state = firmware_verify_state();
+		if (state == FIRMWARE_VERIFYING) return;
+		stop_polling();
+		phase = PHASE_NONE;
+		if (state == FIRMWARE_VERIFIED) show_installing();
+		else show_notice(tr("system_update_corrupt"));
+		return;
+	}
 	ota_state_t s = ota_state();
 	if (s == OTA_DOWNLOADING && phase == PHASE_DOWNLOAD) {
 		show_progress();
@@ -635,32 +659,15 @@ static void online_clicked(void) {
 	start_polling();
 }
 
-// The card goes first, then the file is looked for: on success the screen
-// fades out, and a card left over it would be the last thing drawn.
-static void sd_run(void *unused) {
-	(void)unused;
-	char path[512];
-	if (!firmware_update_file_find(path, sizeof(path))) {
-		gui_notify_popup("system_update_file_missing");
-		return;
-	}
-	printf("firmware: update file %s\n", path);
-	firmware_update_start();
-}
-
-static void sd_clicked(void) {
-	close_card();
-	lv_async_call(sd_run, NULL);
-}
-
 static void show_choice(void) {
 	layout(tr("system_update_firmware"), NULL, false, false);
 	set_button(0, "system_update_online", true, online_clicked);
-	set_button(1, "system_update_from_sd", false, sd_clicked);
+	set_button(1, "system_update_from_sd", false, verify_from_card);
 	set_button(2, "cancel", false, close_card);
 }
 
 void fwupdate_show(void) {
+	if (phase == PHASE_VERIFY) return;
 	if (!veil) {
 		build();
 	}

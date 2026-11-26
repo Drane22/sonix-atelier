@@ -282,7 +282,7 @@ static lv_obj_t *pick_button(lv_obj_t *parent, const char *text, bool accent, lv
 	lv_obj_t *label = lv_label_create(btn);
 	lv_label_set_text(label, tr(text));
 	lv_obj_set_style_text_font(label, &font_ui_22, 0);
-	lv_obj_set_style_text_color(label, accent ? lv_color_white() : theme()->text_primary, 0);
+	lv_obj_set_style_text_color(label, accent ? theme()->accent_ink : theme()->text_primary, 0);
 	lv_obj_center(label);
 	return btn;
 }
@@ -423,8 +423,8 @@ void libraryscan_choose_folders(void) {
 
 // Both buttons sit at the same place at the bottom of the screen; only one is
 // ever visible.
-static lv_obj_t *make_button(lv_obj_t *parent, const char *text, lv_color_t colour, lv_event_cb_t cb,
-							 gui_config_t *cfg) {
+static lv_obj_t *make_button(lv_obj_t *parent, const char *text, lv_color_t colour, lv_color_t ink,
+							 lv_event_cb_t cb, gui_config_t *cfg) {
 	lv_obj_t *button = lv_btn_create(parent);
 	lv_obj_set_size(button, 240, 68);
 	lv_obj_align(button, LV_ALIGN_BOTTOM_MID, 0, -(cfg->padding * 2));
@@ -438,7 +438,7 @@ static lv_obj_t *make_button(lv_obj_t *parent, const char *text, lv_color_t colo
 	lv_obj_t *label = lv_label_create(button);
 	lv_label_set_text(label, tr(text));
 	lv_obj_set_style_text_font(label, &font_ui_24, 0);
-	lv_obj_set_style_text_color(label, lv_color_white(), 0);
+	lv_obj_set_style_text_color(label, ink, 0);
 	lv_obj_center(label);
 
 	return button;
@@ -593,8 +593,8 @@ void libraryscan_init(gui_config_t *cfg) {
 
 	// The two buttons share the foot of the page: cancel while the scan runs, OK
 	// once it is done.
-	cancel_button = make_button(libraryscan_screen, "cancel", lv_color_make(210, 66, 58), cancel_cb, cfg);
-	ok_button = make_button(libraryscan_screen, "ok", theme()->accent, ok_cb, cfg);
+	cancel_button = make_button(libraryscan_screen, "cancel", lv_color_make(210, 66, 58), lv_color_white(), cancel_cb, cfg);
+	ok_button = make_button(libraryscan_screen, "ok", theme()->accent, theme()->accent_ink, ok_cb, cfg);
 	lv_obj_set_hidden(ok_button, true);
 
 	poll_timer = lv_timer_create(poll_cb, SCAN_POLL_MS, NULL);

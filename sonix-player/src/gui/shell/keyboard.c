@@ -700,7 +700,7 @@ static void kb_refresh_caps(keyboard_t *kb) {
 	if (kb->symbols ? kb->symbols2 : kb->shift) {
 		lv_obj_set_style_bg_color(kb->shift_btn, theme()->accent, 0);
 		lv_obj_set_style_bg_opa(kb->shift_btn, LV_OPA_COVER, 0);
-		lv_obj_set_style_image_recolor(kb->shift_icon, lv_color_white(), 0);
+		lv_obj_set_style_image_recolor(kb->shift_icon, theme()->accent_ink, 0);
 	} else {
 		lv_obj_remove_local_style_prop(kb->shift_btn, LV_STYLE_BG_COLOR, 0);
 		lv_obj_remove_local_style_prop(kb->shift_btn, LV_STYLE_BG_OPA, 0);
@@ -748,7 +748,7 @@ static void kb_refresh_caps(keyboard_t *kb) {
 		if (kb->t9_numbers ? kb->symbols2 : kb->shift) {
 			lv_obj_set_style_bg_color(kb->t9_shift_btn, theme()->accent, 0);
 			lv_obj_set_style_bg_opa(kb->t9_shift_btn, LV_OPA_COVER, 0);
-			lv_obj_set_style_image_recolor(kb->t9_shift_icon, lv_color_white(), 0);
+			lv_obj_set_style_image_recolor(kb->t9_shift_icon, theme()->accent_ink, 0);
 		} else {
 			lv_obj_remove_local_style_prop(kb->t9_shift_btn, LV_STYLE_BG_COLOR, 0);
 			lv_obj_remove_local_style_prop(kb->t9_shift_btn, LV_STYLE_BG_OPA, 0);
@@ -1160,7 +1160,7 @@ static void kb_variants_paint(keyboard_t *kb) {
 		if (on) {
 			lv_obj_set_style_bg_color(kb->variant_cell[i], theme()->accent, 0);
 			lv_obj_set_style_bg_opa(kb->variant_cell[i], LV_OPA_COVER, 0);
-			lv_obj_set_style_text_color(kb->variant_label[i], lv_color_white(), 0);
+			lv_obj_set_style_text_color(kb->variant_label[i], theme()->accent_ink, 0);
 		} else {
 			lv_obj_set_style_bg_opa(kb->variant_cell[i], LV_OPA_TRANSP, 0);
 			lv_obj_set_style_text_color(kb->variant_label[i], theme()->text_primary, 0);
@@ -1563,11 +1563,11 @@ static void kb_build_japanese(keyboard_t *kb) {
 	lv_obj_set_style_bg_color(kb->kp_accept_btn, theme()->accent, 0);
 	if (accept_icon) {
 		lv_obj_t *glyph = kb_key_icon(kb->kp_accept_btn, accept_icon);
-		lv_obj_set_style_image_recolor(glyph, lv_color_white(), 0);
+		lv_obj_add_style(glyph, &theme_style_accent_ink, 0);
 	} else {
 		lv_obj_t *label = kb_key_label(kb->kp_accept_btn);
 		lv_label_set_text(label, tr(accept_text ? accept_text : "ok"));
-		lv_obj_set_style_text_color(label, lv_color_white(), 0);
+		lv_obj_add_style(label, &theme_style_accent_ink, 0);
 	}
 
 	// The kanji candidates: a strip standing on the tray, in the host page like
@@ -1718,11 +1718,11 @@ keyboard_t *keyboard_create(lv_obj_t *parent, int width, int height, lv_obj_t *f
 	lv_obj_set_style_bg_color(kb->accept_btn, theme()->accent, 0);
 	if (accept_icon) {
 		lv_obj_t *glyph = kb_key_icon(kb->accept_btn, accept_icon);
-		lv_obj_set_style_image_recolor(glyph, lv_color_white(), 0);
+		lv_obj_add_style(glyph, &theme_style_accent_ink, 0);
 	} else {
 		lv_obj_t *label = kb_key_label(kb->accept_btn);
 		lv_label_set_text(label, tr(accept_text ? accept_text : "ok"));
-		lv_obj_set_style_text_color(label, lv_color_white(), 0);
+		lv_obj_add_style(label, &theme_style_accent_ink, 0);
 	}
 
 	// --- the T9 panel ---
@@ -1776,11 +1776,11 @@ keyboard_t *keyboard_create(lv_obj_t *parent, int width, int height, lv_obj_t *f
 	lv_obj_set_style_bg_color(kb->t9_accept_btn, theme()->accent, 0);
 	if (accept_icon) {
 		lv_obj_t *glyph = kb_key_icon(kb->t9_accept_btn, accept_icon);
-		lv_obj_set_style_image_recolor(glyph, lv_color_white(), 0);
+		lv_obj_add_style(glyph, &theme_style_accent_ink, 0);
 	} else {
 		lv_obj_t *label = kb_key_label(kb->t9_accept_btn);
 		lv_label_set_text(label, tr(accept_text ? accept_text : "ok"));
-		lv_obj_set_style_text_color(label, lv_color_white(), 0);
+		lv_obj_add_style(label, &theme_style_accent_ink, 0);
 	}
 
 	// The pause that commits a multitap character. Paused until something is

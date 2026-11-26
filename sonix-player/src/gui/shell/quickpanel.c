@@ -389,10 +389,10 @@ static void refresh_now_playing_card(void) {
 
 	// Accent glyph on a disc that is white under the dark theme and the quiet
 	// dark circle under the light one, where white would vanish into the card.
-	lv_obj_set_style_image_recolor(np_play_icon, theme()->accent, 0);
+	lv_obj_set_style_image_recolor(np_play_icon, theme()->accent_ink, 0);
 	lv_obj_set_style_image_recolor_opa(np_play_icon, LV_OPA_COVER, 0);
 	if (np_play_btn) {
-		lv_obj_set_style_bg_color(np_play_btn, theme()->dark ? lv_color_white() : theme()->surface_pressed, 0);
+		lv_obj_set_style_bg_color(np_play_btn, theme()->accent, 0);
 	}
 
 	// On a radio the star is about the station and lives in the radio database:
@@ -1444,7 +1444,7 @@ static void circle_button_set_on(lv_obj_t *btn, bool on) {
 		lv_obj_set_style_bg_color(btn, theme()->accent, 0);
 		lv_obj_set_style_bg_opa(btn, LV_OPA_COVER, 0);
 		if (icon) {
-			lv_obj_set_style_image_recolor(icon, lv_color_white(), 0);
+			lv_obj_set_style_image_recolor(icon, theme()->accent_ink, 0);
 		}
 	} else {
 		lv_obj_remove_local_style_prop(btn, LV_STYLE_BG_COLOR, 0);

@@ -16,11 +16,12 @@
 // The pill follows the theme rather than being dark in both: it sits over the
 // controls block as well as over artwork, and a fixed dark pill would be the
 // only black thing on a light screen.
-#define OVERLAY_WIDTH 340
-#define OVERLAY_HEIGHT 72
-#define OVERLAY_TOP_Y 96 // clear of the artwork
+#define OVERLAY_WIDTH 336
+#define OVERLAY_HEIGHT 64
+#define OVERLAY_TOP_Y 80 // clear of header and artwork centre
 #define OVERLAY_RADIUS (OVERLAY_HEIGHT / 2)
 #define OVERLAY_HIDE_MS 1600
+#define OVERLAY_FADE_MS 150
 
 // Where the icon changes: silent, quiet, loud.
 #define VOLUME_LOW_PERCENT 1
@@ -44,7 +45,9 @@ static int shown_percent;
 // it drops the label back to LVGL's default black as soon as the level falls
 // below the warning, which is unreadable on a dark pill.
 static void apply_label_color(int percent) {
-	lv_color_t colour = percent > VOLUME_WARN_PERCENT ? VOLUME_WARN_COLOR : theme()->text_primary;
+	bool dark_pill = player_sheet_is_open() || theme()->dark;
+	lv_color_t ink = dark_pill ? lv_color_hex(0xF1F5F9) : theme()->text_primary;
+	lv_color_t colour = percent > VOLUME_WARN_PERCENT ? VOLUME_WARN_COLOR : ink;
 	lv_obj_set_style_text_color(overlay_label, colour, 0);
 }
 
@@ -55,10 +58,18 @@ static void apply_theme(void) {
 		return;
 	}
 
-	lv_obj_set_style_bg_color(overlay, theme()->panel, 0);
-	lv_obj_set_style_bg_opa(overlay, LV_OPA_90, 0);
+	bool in_player = player_sheet_is_open();
+	lv_color_t bg = in_player ? lv_color_hex(0x18202B) : theme()->panel;
+	lv_color_t ink = in_player ? lv_color_hex(0xF1F5F9) : theme()->text_primary;
+	lv_color_t acc = in_player ? player_active_accent() : theme()->accent;
 
-	lv_obj_set_style_image_recolor(overlay_icon, theme()->text_primary, 0);
+	lv_obj_set_style_bg_color(overlay, bg, 0);
+	lv_obj_set_style_bg_opa(overlay, 238, 0);
+	lv_obj_set_style_border_width(overlay, in_player ? 1 : 0, 0);
+	lv_obj_set_style_border_color(overlay, lv_color_hex(0x2B3646), 0);
+	lv_obj_set_style_border_opa(overlay, LV_OPA_80, 0);
+
+	lv_obj_set_style_image_recolor(overlay_icon, ink, 0);
 	lv_obj_set_style_image_recolor_opa(overlay_icon, LV_OPA_COVER, 0);
 
 	apply_label_color(shown_percent);
@@ -66,11 +77,22 @@ static void apply_theme(void) {
 	// The unfilled part of the scale: the text colour at low opacity reads as
 	// a quiet groove against either background, where a fixed white would read
 	// as nothing at all on the light one.
-	lv_obj_set_style_bg_color(overlay_slider, theme()->text_primary, LV_PART_MAIN);
+	lv_obj_set_style_bg_color(overlay_slider, ink, LV_PART_MAIN);
 	lv_obj_set_style_bg_opa(overlay_slider, LV_OPA_20, LV_PART_MAIN);
 
-	lv_obj_set_style_bg_color(overlay_slider, theme()->accent, LV_PART_INDICATOR);
+	lv_obj_set_style_bg_color(overlay_slider, acc, LV_PART_INDICATOR);
 	theme_apply_slider_knob(overlay_slider);
+}
+
+static void overlay_opa_exec_cb(void *var, int32_t v) {
+	lv_obj_set_style_opa((lv_obj_t *)var, (lv_opa_t)v, 0);
+}
+
+static void overlay_fade_out_done_cb(lv_anim_t *a) {
+	(void)a;
+	if (veil) {
+		lv_obj_set_hidden(veil, true);
+	}
 }
 
 static void hide_cb(lv_timer_t *timer) {
@@ -81,8 +103,22 @@ static void hide_cb(lv_timer_t *timer) {
 		lv_timer_reset(hide_timer);
 		return;
 	}
-	lv_obj_set_hidden(veil, true);
 	lv_timer_pause(hide_timer);
+	lv_anim_delete(overlay, overlay_opa_exec_cb);
+	if (theme_reduced_motion()) {
+		lv_obj_set_style_opa(overlay, LV_OPA_COVER, 0);
+		lv_obj_set_hidden(veil, true);
+		return;
+	}
+	lv_anim_t a;
+	lv_anim_init(&a);
+	lv_anim_set_var(&a, overlay);
+	lv_anim_set_exec_cb(&a, overlay_opa_exec_cb);
+	lv_anim_set_values(&a, lv_obj_get_style_opa(overlay, 0), LV_OPA_TRANSP);
+	lv_anim_set_duration(&a, OVERLAY_FADE_MS);
+	lv_anim_set_path_cb(&a, lv_anim_path_ease_out);
+	lv_anim_set_completed_cb(&a, overlay_fade_out_done_cb);
+	lv_anim_start(&a);
 }
 
 static void set_icon_for(int percent) {
@@ -151,8 +187,24 @@ void volume_overlay_show(int percent) {
 	lv_label_set_text_fmt(overlay_label, "%d", percent);
 	apply_label_color(percent);
 
+	bool was_hidden = lv_obj_is_hidden(veil);
+	lv_anim_delete(overlay, overlay_opa_exec_cb);
 	lv_obj_set_hidden(veil, false);
 	lv_obj_move_foreground(veil);
+	if (theme_reduced_motion()) {
+		lv_obj_set_style_opa(overlay, LV_OPA_COVER, 0);
+	} else if (was_hidden || lv_obj_get_style_opa(overlay, 0) < LV_OPA_COVER) {
+		lv_opa_t from = was_hidden ? LV_OPA_TRANSP : lv_obj_get_style_opa(overlay, 0);
+		lv_obj_set_style_opa(overlay, from, 0);
+		lv_anim_t a;
+		lv_anim_init(&a);
+		lv_anim_set_var(&a, overlay);
+		lv_anim_set_exec_cb(&a, overlay_opa_exec_cb);
+		lv_anim_set_values(&a, from, LV_OPA_COVER);
+		lv_anim_set_duration(&a, OVERLAY_FADE_MS);
+		lv_anim_set_path_cb(&a, lv_anim_path_ease_out);
+		lv_anim_start(&a);
+	}
 
 	// Every key press pushes the dismissal back, so holding the key keeps the
 	// bar up for as long as the level is moving.

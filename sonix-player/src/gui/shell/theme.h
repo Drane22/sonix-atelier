@@ -11,11 +11,16 @@ typedef struct {
 	lv_color_t screen_bg;	   // page background
 	lv_color_t surface;		   // list rows, cards
 	lv_color_t surface_pressed; // the same, while a finger is on it
+	lv_color_t elevated;	   // elevated cards / mini-player surface
+	lv_color_t border;		   // hairline borders & dividers
 	lv_color_t panel;		   // status bar and the player's control block
 	lv_color_t cover_bg;	   // behind the artwork, when a track has none
 	lv_color_t text_primary;
 	lv_color_t text_secondary;
-	lv_color_t accent;		   // the blue used for active things
+	lv_color_t accent;		   // the accent used for active things
+	lv_color_t accent_pressed; // pressed state of the active accent
+	lv_color_t highlight;	   // subtle highlight tint derived from the accent
+	lv_color_t accent_ink;	   // contrasting text/icon ink drawn on `accent`
 	bool dark;
 } theme_palette_t;
 
@@ -26,6 +31,8 @@ extern lv_style_t theme_style_screen;
 extern lv_style_t theme_style_panel;
 extern lv_style_t theme_style_card;
 extern lv_style_t theme_style_card_pressed;
+extern lv_style_t theme_style_card_elevated;
+extern lv_style_t theme_style_border;
 extern lv_style_t theme_style_text;
 extern lv_style_t theme_style_text_dim;
 extern lv_style_t theme_style_icon;
@@ -38,6 +45,7 @@ extern lv_style_t theme_style_switch_checked; // image_recolor for monochrome ic
 // snapshot -- it keeps whichever accent was live when the page was built, and
 // does not follow a later change.
 extern lv_style_t theme_style_accent_bg;
+extern lv_style_t theme_style_accent_ink;
 
 // The unfilled part of a slider's track: the secondary text colour at low
 // opacity, which reads as a quiet groove on both palettes.
@@ -89,5 +97,11 @@ void theme_set_dark(bool dark);
 // alone entirely. Off by default, persists in the config.
 bool theme_dynamic_tint(void);
 void theme_set_dynamic_tint(bool on);
+
+// Animation intensity (Appearance / Now Playing > Animation intensity):
+// false = Expressive (default), true = Reduced motion (preserves all features
+// while skipping continuous/interpolated visual transitions to save CPU/redraws).
+bool theme_reduced_motion(void);
+void theme_set_reduced_motion(bool reduced);
 
 #endif // THEME_H

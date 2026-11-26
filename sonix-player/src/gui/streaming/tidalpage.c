@@ -2029,8 +2029,8 @@ static void paint_search_pills(void) {
 	for (int i = 0; i < 3; i++) {
 		bool on = i == search_kind_index;
 		lv_obj_set_style_bg_color(search_pills[i], on ? theme()->accent : theme()->surface_pressed, 0);
-		lv_obj_set_style_text_color(lv_obj_get_child(search_pills[i], 0), on ? lv_color_white() : theme()->text_primary,
-									0);
+		lv_obj_set_style_text_color(lv_obj_get_child(search_pills[i], 0),
+									on ? theme()->accent_ink : theme()->text_primary, 0);
 	}
 }
 
@@ -2368,7 +2368,7 @@ static void paint_login(void) {
 	lv_obj_set_style_text_color(login_url, theme()->accent, 0);
 	lv_obj_set_style_text_color(login_code, theme()->text_primary, 0);
 	lv_obj_set_style_bg_color(login_retry, theme()->accent, 0);
-	lv_obj_set_style_text_color(lv_obj_get_child(login_retry, 0), lv_color_white(), 0);
+	lv_obj_set_style_text_color(lv_obj_get_child(login_retry, 0), theme()->accent_ink, 0);
 }
 
 static void build_login_page(gui_config_t *cfg) {
@@ -2577,8 +2577,8 @@ static void quality_refresh(void) {
 		}
 		bool on = QUALITY_VALUES[i] == current;
 		lv_obj_set_style_bg_color(quality_pills[i], on ? theme()->accent : theme()->surface_pressed, 0);
-		lv_obj_set_style_text_color(lv_obj_get_child(quality_pills[i], 0), on ? lv_color_white() : theme()->text_primary,
-									0);
+		lv_obj_set_style_text_color(lv_obj_get_child(quality_pills[i], 0),
+									on ? theme()->accent_ink : theme()->text_primary, 0);
 	}
 }
 

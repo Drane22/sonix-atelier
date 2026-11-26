@@ -9,6 +9,7 @@
 #include "src/gui/settings/bootlogopage.h"
 #include "src/gui/shell/corners.h"
 #include "src/gui/shell/settingsrow.h"
+#include "src/gui/shell/startup_anim.h"
 #include "src/gui/shell/switcher.h"
 #include "src/gui/shell/theme.h"
 #include "src/gui/shell/topbar.h"
@@ -25,7 +26,10 @@ static lv_obj_t *tint_toggle;
 static lv_obj_t *battery_percent_toggle;
 static lv_obj_t *statusbar_always_toggle;
 static lv_obj_t *rounded_corners_toggle;
+static lv_obj_t *startup_anim_toggle;
 static lv_obj_t *text_size_pill[2]; // normal / large
+static lv_obj_t *np_accent_pill[2]; // 0 = fixed, 1 = adaptive
+static lv_obj_t *motion_pill[2];    // 0 = expressive, 1 = reduced
 // The status bar draws the battery either way; this setting is only about the
 // number beside it, and is on by default.
 static void battery_percent_cb(lv_event_t *e) {
@@ -49,6 +53,11 @@ static void rounded_corners_cb(lv_event_t *e) {
 	corners_set_enabled(lv_obj_has_state(rounded_corners_toggle, LV_STATE_CHECKED));
 }
 
+static void startup_anim_cb(lv_event_t *e) {
+	(void)e;
+	startup_anim_set_enabled(lv_obj_has_state(startup_anim_toggle, LV_STATE_CHECKED));
+}
+
 // The accent's hue spread over the backgrounds and cards. theme_set_dynamic_tint
 // repaints the interface itself, including this page.
 static void dynamic_tint_cb(lv_event_t *e) {
@@ -61,6 +70,48 @@ static void refresh_text_size_pills(void) {
 	for (int i = 0; i < 2; i++) {
 		settingsrow_pill_active(text_size_pill[i], i == active);
 	}
+}
+
+static void refresh_np_accent_pills(void) {
+	int active = player_cover_accent() ? 1 : 0;
+	for (int i = 0; i < 2; i++) {
+		if (np_accent_pill[i]) {
+			settingsrow_pill_active(np_accent_pill[i], i == active);
+		}
+	}
+}
+
+static void np_accent_mode_cb(lv_event_t *e) {
+	if (switcher_back_drag_active()) {
+		return;
+	}
+	int adaptive = (int)(intptr_t)lv_event_get_user_data(e);
+	player_cover_accent_set(adaptive != 0);
+	refresh_np_accent_pills();
+}
+
+static void refresh_motion_pills(void) {
+	int active = theme_reduced_motion() ? 1 : 0;
+	for (int i = 0; i < 2; i++) {
+		if (motion_pill[i]) {
+			settingsrow_pill_active(motion_pill[i], i == active);
+		}
+	}
+}
+
+static void motion_mode_cb(lv_event_t *e) {
+	if (switcher_back_drag_active()) {
+		return;
+	}
+	int reduced = (int)(intptr_t)lv_event_get_user_data(e);
+	theme_set_reduced_motion(reduced != 0);
+	refresh_motion_pills();
+}
+
+static void appearance_loaded_cb(lv_event_t *e) {
+	(void)e;
+	refresh_np_accent_pills();
+	refresh_motion_pills();
 }
 
 // Applied at once, on every page: see fonts_set_large_text().
@@ -86,7 +137,7 @@ static void refresh_buttons(void) {
 	lv_obj_t *off = dark ? btn_light : btn_dark;
 
 	lv_obj_set_style_bg_color(on, theme()->accent, 0);
-	lv_obj_set_style_text_color(lv_obj_get_child(on, 0), lv_color_white(), 0);
+	lv_obj_set_style_text_color(lv_obj_get_child(on, 0), theme()->accent_ink, 0);
 
 	lv_obj_set_style_bg_color(off, theme()->surface_pressed, 0);
 	lv_obj_set_style_text_color(lv_obj_get_child(off, 0), theme()->text_primary, 0);
@@ -136,7 +187,7 @@ static void refresh_clock_buttons(void) {
 		}
 		if (i == active) {
 			lv_obj_set_style_bg_color(btn_clock[i], theme()->accent, 0);
-			lv_obj_set_style_text_color(lv_obj_get_child(btn_clock[i], 0), lv_color_white(), 0);
+			lv_obj_set_style_text_color(lv_obj_get_child(btn_clock[i], 0), theme()->accent_ink, 0);
 		} else {
 			lv_obj_set_style_bg_color(btn_clock[i], theme()->surface_pressed, 0);
 			lv_obj_set_style_text_color(lv_obj_get_child(btn_clock[i], 0), theme()->text_primary, 0);
@@ -313,9 +364,40 @@ void appearance_init(gui_config_t *cfg) {
 	lv_obj_set_style_text_font(tint_note, &font_ui_22, 0);
 	lv_label_set_text(tint_note, tr("appearance_dynamic_tint_note"));
 
+	// Now Playing Ambient Accent Mode: Adaptive (derived from album cover) or Fixed.
+	lv_obj_t *np_accent_pills = NULL;
+	settingsrow_pills(container, "ambient_accent_mode", &np_accent_pills);
+	np_accent_pill[1] = settingsrow_pill(np_accent_pills, "ambient_adaptive", 1, np_accent_mode_cb);
+	np_accent_pill[0] = settingsrow_pill(np_accent_pills, "ambient_fixed", 0, np_accent_mode_cb);
+
+	lv_obj_t *np_accent_note = lv_label_create(container);
+	lv_label_set_long_mode(np_accent_note, LV_LABEL_LONG_WRAP);
+	lv_obj_set_width(np_accent_note, lv_pct(100));
+	lv_obj_add_style(np_accent_note, &theme_style_text_dim, 0);
+	lv_obj_set_style_text_font(np_accent_note, &font_ui_22, 0);
+	lv_label_set_text(np_accent_note, tr("ambient_accent_mode_note"));
+
+	// Animation intensity across Now Playing carousel, lyrics, and volume OSD.
+	lv_obj_t *motion_pills = NULL;
+	settingsrow_pills(container, "appearance_motion", &motion_pills);
+	motion_pill[0] = settingsrow_pill(motion_pills, "motion_expressive", 0, motion_mode_cb);
+	motion_pill[1] = settingsrow_pill(motion_pills, "motion_reduced", 1, motion_mode_cb);
+
 	// The picture shown while the player boots, which follows the theme and
 	// the accent unless one of the user's own is chosen.
 	settingsrow_add(container, "bootlogo", NULL, switch_screen_cb, bootlogopage_screen);
+
+	// Minimalist cold-boot logo reveal overlay.
+	settingsrow_toggle(container, "appearance_startup_anim", &startup_anim_toggle, startup_anim_cb);
+	if (startup_anim_enabled()) {
+		lv_obj_add_state(startup_anim_toggle, LV_STATE_CHECKED);
+	}
+	lv_obj_t *startup_note = lv_label_create(container);
+	lv_label_set_long_mode(startup_note, LV_LABEL_LONG_WRAP);
+	lv_obj_set_width(startup_note, lv_pct(100));
+	lv_obj_add_style(startup_note, &theme_style_text_dim, 0);
+	lv_obj_set_style_text_font(startup_note, &font_ui_22, 0);
+	lv_label_set_text(startup_note, tr("appearance_startup_anim_note"));
 
 	// How big the small text on every page is: the secondary lines, notes,
 	// clocks and counters. See fonts.c for which sizes grow and by how much.
@@ -356,8 +438,13 @@ void appearance_init(gui_config_t *cfg) {
 	refresh_clock_buttons();
 	refresh_accent_buttons();
 	refresh_text_size_pills();
+	refresh_np_accent_pills();
+	refresh_motion_pills();
 	theme_register_refresh(refresh_buttons);
 	theme_register_refresh(refresh_text_size_pills);
 	theme_register_refresh(refresh_clock_buttons);
 	theme_register_refresh(refresh_accent_buttons);
+	theme_register_refresh(refresh_np_accent_pills);
+	theme_register_refresh(refresh_motion_pills);
+	lv_obj_add_event_cb(appearance_screen, appearance_loaded_cb, LV_EVENT_SCREEN_LOADED, NULL);
 }

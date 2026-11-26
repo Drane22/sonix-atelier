@@ -24,9 +24,23 @@ import sys
 
 try:
     import cairosvg
+    HAS_CAIROSVG = True
+except ImportError:
+    cairosvg = None
+    HAS_CAIROSVG = False
+
+if not HAS_CAIROSVG:
+    try:
+        import gi
+        gi.require_version("GdkPixbuf", "2.0")
+        from gi.repository import GdkPixbuf
+    except (ImportError, ValueError):
+        sys.exit("needs cairosvg or gi/GdkPixbuf plus pillow")
+
+try:
     from PIL import Image
 except ImportError:
-    sys.exit("needs cairosvg and pillow: pip install cairosvg pillow")
+    sys.exit("needs pillow: pip install pillow")
 
 import io
 
@@ -279,6 +293,14 @@ ICONS = [
     # Over the lyrics, beside the star or the ellipsis: look the words up again
     # on LRCLIB, to replace them. The star's size, since the two sit together.
     ("lyrics-search.svg", "lyrics_search", 32),
+    ("lyrics.svg", "lyrics", 24),
+    ("lyrics.svg", "lyrics_empty", 52),
+    ("album.svg", "album_small", 24),
+    ("list-queue.svg", "queue_small", 24),
+    ("maximize-2.svg", "expand", 26),
+    ("minimize-2.svg", "collapse", 26),
+    ("font-settings.svg", "lyrics_aa", 26),
+    ("chevron-down.svg", "chevron_down_small", 28),
     ("radio-recent.svg", "radio_recent", 34), # stations played most recently
     ("custom-radio.svg", "radio_custom", 34), # the stations written into radio.txt
     # Under a station's name: the stream's quality, one glyph in four colours
@@ -383,6 +405,7 @@ ICONS = [
     # The heart that jumps out when the coffee QR code is closed. 160 px
     # because the animation grows it to 1:1 and no further.
     ("heart.svg", "heart", 160),
+
 ]
 
 # Main menu and section tiles, which keep their own colours and are therefore
@@ -393,6 +416,16 @@ MAIN_MENU_ICON_SIZE = 128
 SECTION_ICON_SIZE = 112
 
 COLOR_ICONS = [
+    ("atelier-breakwater.png", "atelier_breakwater", 56),
+    ("atelier-towerblast.png", "atelier_towerblast", 56),
+    ("atelier-blockblast.png", "atelier_blockblast", 56),
+    ("atelier-orbit.png", "atelier_orbit", 56),
+    ("atelier-prism.png", "atelier_prism", 56),
+    ("atelier-2048.png", "atelier_2048", 56),
+    ("atelier-word.png", "atelier_word", 56),
+    ("atelier-games.png", "atelier_games", 80),
+    ("atelier-record.png", "atelier_record", 88),
+    ("atelier-cassette.png", "atelier_cassette", 112),
     # The quality badges under a track's title. Here rather than above because
     # the four are one shape in four colours -- teal, olive, amber, magenta --
     # and the white rendering would make them one icon repeated.
@@ -457,6 +490,16 @@ COLOR_ICONS = [
 ]
 
 
+def _rasterize_svg(svg_path, width, height):
+    if HAS_CAIROSVG:
+        png = cairosvg.svg2png(url=svg_path, output_width=width, output_height=height)
+        return Image.open(io.BytesIO(png)).convert("RGBA")
+    pb = GdkPixbuf.Pixbuf.new_from_file_at_scale(svg_path, width, height, False)
+    mode = "RGBA" if pb.get_has_alpha() else "RGB"
+    img = Image.frombytes(mode, (pb.get_width(), pb.get_height()), bytes(pb.get_pixels()), "raw", mode, pb.get_rowstride(), 1)
+    return img.convert("RGBA")
+
+
 def render(svg_path, size):
     """SVG -> list of BGRA bytes, forced to white so recolouring works.
 
@@ -464,8 +507,7 @@ def render(svg_path, size):
     (width, height) for the AirPods artwork, which is not square.
     """
     width, height = size if isinstance(size, tuple) else (size, size)
-    png = cairosvg.svg2png(url=svg_path, output_width=width, output_height=height)
-    img = Image.open(io.BytesIO(png)).convert("RGBA")
+    img = _rasterize_svg(svg_path, width, height)
 
     raw = img.tobytes()  # RGBA, 4 bytes per pixel
     out = bytearray()
@@ -478,8 +520,7 @@ def render(svg_path, size):
 def render_color(path, size):
     """PNG or SVG -> list of BGRA bytes with the original colours kept."""
     if path.lower().endswith(".svg"):
-        png = cairosvg.svg2png(url=path, output_width=size, output_height=size)
-        img = Image.open(io.BytesIO(png)).convert("RGBA")
+        img = _rasterize_svg(path, size, size)
     else:
         img = Image.open(path).convert("RGBA")
     if img.size != (size, size):
@@ -532,6 +573,22 @@ def main():
             % (filename, w, h, name, c_array(data), name, w, h, w * 4, name, name)
         )
         parts_h.append("extern const lv_image_dsc_t icon_%s;" % name)
+
+    # An opaque half-resolution wallpaper stored in the panel's native RGB565.
+    wallpaper = Image.open(os.path.join(ICON_DIR, "atelier-dusk.png")).convert("RGB")
+    w, h = wallpaper.size
+    pixels = bytearray()
+    for r, g, b in wallpaper.getdata():
+        pixel = ((r >> 3) << 11) | ((g >> 2) << 5) | (b >> 3)
+        pixels.extend(pixel.to_bytes(2, "little"))
+    parts_c.append(
+        f"static const uint8_t dusk_pixels[] = {{\n{c_array(pixels)}\n}};\n"
+        "const lv_image_dsc_t atelier_dusk = {\n"
+        f"\t.header = {{.magic = LV_IMAGE_HEADER_MAGIC, .cf = LV_COLOR_FORMAT_RGB565, "
+        f".w = {w}, .h = {h}, .stride = {w * 2}}},\n"
+        "\t.data_size = sizeof(dusk_pixels), .data = dusk_pixels,\n};\n"
+    )
+    parts_h.append("extern const lv_image_dsc_t atelier_dusk;")
 
     header = (
         "/*\n"

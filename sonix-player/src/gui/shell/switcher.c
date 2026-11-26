@@ -47,13 +47,16 @@ static int8_t back_btn_top_bar_height;
 // On the player the status bar is hidden, so there is no row of its own for the
 // chevron to line up with and it would sit against the top edge. This is the
 // air it keeps instead, and what the player's own header row is aligned to.
-#define BACK_BTN_PLAYER_TOP 14
+#define BACK_BTN_PLAYER_TOP 4
 
 // Whether the status bar stays up over the player too (back_btn_player_below_bar).
 static bool player_bar_shown;
 
-// How far down the chevron sits on the player.
-static int player_top(void) { return player_bar_shown ? back_btn_top_bar_height : BACK_BTN_PLAYER_TOP; }
+// How far down the chevron sits on the player: tucked cleanly into the minimal
+// navigation header right below the status bar when shown, or near the top edge.
+static int player_top(void) {
+	return player_bar_shown ? (back_btn_top_bar_height - back_btn_padding - 12) : BACK_BTN_PLAYER_TOP;
+}
 
 static void place_back_btn(bool below_top_bar) {
 	// Same offsets as the corner buttons on the right (playlists, settings,
@@ -271,7 +274,7 @@ static void back_underlay_build(void) {
 		lv_image_set_src(chevron, &icon_chevron_left);
 		// The same two placements as place_back_btn(): the player's own offset
 		// where there is no status bar, the status bar's height everywhere else.
-		int y = back_btn_padding + (going_to_player ? BACK_BTN_PLAYER_TOP : back_btn_top_bar_height);
+		int y = back_btn_padding + (going_to_player ? player_top() : back_btn_top_bar_height);
 		lv_obj_set_pos(chevron, back_btn_padding + 10, y + 10);
 		if (going_to_player && chevron_over_cover) {
 			lv_obj_set_style_image_recolor(chevron, lv_color_white(), 0);

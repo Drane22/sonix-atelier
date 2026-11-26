@@ -1421,42 +1421,115 @@ static void coverflow_cb(lv_event_t *e) {
 	coverflow_set_enabled(lv_obj_has_state(lv_event_get_target(e), LV_STATE_CHECKED));
 }
 
-static lv_obj_t *cover_accent_switch;
-
-static void cover_accent_cb(lv_event_t *e) {
-	player_cover_accent_set(lv_obj_has_state(lv_event_get_target(e), LV_STATE_CHECKED));
-}
-
 // ---------------------------------------------------------------------------
-// Which of the two arrangements the now-playing page uses
-//
-// Here and not under Appearance, where everything applies to the whole
-// interface: this applies to the music on the card and to nothing else -- not
-// to a radio station, not to a stream from a phone, not to an audiobook.
-//
-// The page owns the setting; this stores it and asks the page to decide again.
+// Now Playing & Lyrics Settings (Sonix Atelier — Ambient Edition)
 // ---------------------------------------------------------------------------
 
-static lv_obj_t *layout_standard_pill;
-static lv_obj_t *layout_alternative_pill;
-static lv_obj_t *layout_studio_pill;
+static lv_obj_t *np_accent_mode_pill[2]; // 0 = Fixed, 1 = Adaptive
+static lv_obj_t *np_motion_pill[2];      // 0 = Expressive, 1 = Reduced
+static lv_obj_t *lyrics_mode_pill[2];    // 0 = Integrated, 1 = Full-screen
+static lv_obj_t *lyrics_remember_switch;
+static lv_obj_t *lyrics_size_pill[3];    // Small, Medium, Large
+static lv_obj_t *lyrics_offset_val_label;
+static lv_obj_t *lyrics_offset_step_pill[5];
 
-static void layout_refresh(void) {
-	if (!layout_standard_pill) {
-		return;
+static void nowplaying_settings_refresh(void) {
+	bool adaptive = player_cover_accent();
+	if (np_accent_mode_pill[0]) settingsrow_pill_active(np_accent_mode_pill[0], !adaptive);
+	if (np_accent_mode_pill[1]) settingsrow_pill_active(np_accent_mode_pill[1], adaptive);
+
+	bool reduced = theme_reduced_motion();
+	if (np_motion_pill[0]) settingsrow_pill_active(np_motion_pill[0], !reduced);
+	if (np_motion_pill[1]) settingsrow_pill_active(np_motion_pill[1], reduced);
+
+	player_lyrics_mode_t lmode = player_lyrics_default_mode();
+	if (lyrics_mode_pill[0]) settingsrow_pill_active(lyrics_mode_pill[0], lmode == PLAYER_LYRICS_INTEGRATED);
+	if (lyrics_mode_pill[1]) settingsrow_pill_active(lyrics_mode_pill[1], lmode == PLAYER_LYRICS_FULLSCREEN);
+
+	if (lyrics_remember_switch) {
+		lv_obj_set_state(lyrics_remember_switch, LV_STATE_CHECKED, player_lyrics_remember_mode());
 	}
-	player_layout_t chosen = player_layout_get();
-	settingsrow_pill_active(layout_standard_pill, chosen == PLAYER_LAYOUT_STANDARD);
-	settingsrow_pill_active(layout_alternative_pill, chosen == PLAYER_LAYOUT_ALTERNATIVE);
-	settingsrow_pill_active(layout_studio_pill, chosen == PLAYER_LAYOUT_STUDIO);
+
+	player_lyrics_text_size_t lsize = player_lyrics_text_size();
+	for (int i = 0; i < 3; i++) {
+		if (lyrics_size_pill[i]) {
+			settingsrow_pill_active(lyrics_size_pill[i], (int)lsize == i);
+		}
+	}
+
+	int off_ms = player_lyrics_offset_ms();
+	if (lyrics_offset_val_label) {
+		char buf[32];
+		if (off_ms == 0) {
+			snprintf(buf, sizeof(buf), "0.0s");
+		} else {
+			int sign = off_ms < 0 ? -1 : 1;
+			int mag = off_ms < 0 ? -off_ms : off_ms;
+			snprintf(buf, sizeof(buf), "%c%d.%ds", sign < 0 ? '-' : '+', mag / 1000, (mag % 1000) / 100);
+		}
+		lv_label_set_text(lyrics_offset_val_label, buf);
+	}
+	for (int i = 0; i < 5; i++) {
+		if (lyrics_offset_step_pill[i]) {
+			settingsrow_pill_active(lyrics_offset_step_pill[i], i == 2 && off_ms == 0);
+		}
+	}
 }
 
-static void layout_pick_cb(lv_event_t *e) {
+static void np_accent_pick_cb(lv_event_t *e) {
 	if (player_sheet_drag_active() || switcher_back_drag_active()) {
 		return;
 	}
-	player_layout_set((player_layout_t)(intptr_t)lv_event_get_user_data(e));
-	layout_refresh();
+	int adaptive = (int)(intptr_t)lv_event_get_user_data(e);
+	player_cover_accent_set(adaptive != 0);
+	nowplaying_settings_refresh();
+}
+
+static void np_motion_pick_cb(lv_event_t *e) {
+	if (player_sheet_drag_active() || switcher_back_drag_active()) {
+		return;
+	}
+	int reduced = (int)(intptr_t)lv_event_get_user_data(e);
+	theme_set_reduced_motion(reduced != 0);
+	nowplaying_settings_refresh();
+}
+
+static void lyrics_mode_pick_cb(lv_event_t *e) {
+	if (player_sheet_drag_active() || switcher_back_drag_active()) {
+		return;
+	}
+	player_lyrics_set_default_mode((player_lyrics_mode_t)(intptr_t)lv_event_get_user_data(e));
+	nowplaying_settings_refresh();
+}
+
+static void lyrics_remember_cb(lv_event_t *e) {
+	player_lyrics_set_remember_mode(lv_obj_has_state(lv_event_get_target(e), LV_STATE_CHECKED));
+}
+
+static void lyrics_size_pick_cb(lv_event_t *e) {
+	if (player_sheet_drag_active() || switcher_back_drag_active()) {
+		return;
+	}
+	player_lyrics_set_text_size((player_lyrics_text_size_t)(intptr_t)lv_event_get_user_data(e));
+	nowplaying_settings_refresh();
+}
+
+static void lyrics_offset_step_cb(lv_event_t *e) {
+	if (player_sheet_drag_active() || switcher_back_drag_active()) {
+		return;
+	}
+	int delta = (int)(intptr_t)lv_event_get_user_data(e);
+	if (delta == 0) {
+		player_lyrics_set_offset_ms(0);
+	} else {
+		player_lyrics_set_offset_ms(player_lyrics_offset_ms() + delta);
+	}
+	nowplaying_settings_refresh();
+}
+
+static void nowplaying_loaded_cb(lv_event_t *e) {
+	(void)e;
+	nowplaying_settings_refresh();
 }
 
 // ---------------------------------------------------------------------------
@@ -1560,32 +1633,18 @@ static void build_nowplaying_page(gui_config_t *cfg) {
 	lv_obj_t *container = settingsrow_page(nowplaying_screen, cfg, "musicsettings_now_playing");
 	settingsrow_title_corner_slots(settingsrow_page_title(nowplaying_screen), cfg, 0);
 
-	// How the now-playing page is arranged.
-	lv_obj_t *layout_pills = NULL;
-	settingsrow_pills(container, "musicsettings_player_layout", &layout_pills);
-	layout_standard_pill =
-		settingsrow_pill(layout_pills, "musicsettings_layout_standard", PLAYER_LAYOUT_STANDARD, layout_pick_cb);
-	layout_alternative_pill =
-		settingsrow_pill(layout_pills, "musicsettings_layout_alternative", PLAYER_LAYOUT_ALTERNATIVE, layout_pick_cb);
-	layout_studio_pill =
-		settingsrow_pill(layout_pills, "musicsettings_layout_studio", PLAYER_LAYOUT_STUDIO, layout_pick_cb);
+	// Adaptive vs Fixed accent mode on Now Playing.
+	lv_obj_t *accent_pills = NULL;
+	settingsrow_pills(container, "ambient_accent_mode", &accent_pills);
+	np_accent_mode_pill[1] = settingsrow_pill(accent_pills, "ambient_adaptive", 1, np_accent_pick_cb);
+	np_accent_mode_pill[0] = settingsrow_pill(accent_pills, "ambient_fixed", 0, np_accent_pick_cb);
+	option_note(container, "ambient_accent_mode_note");
 
-	layout_refresh();
-	theme_register_refresh(layout_refresh);
-
-	// Said here rather than left to be discovered: the Waveform arrangement is
-	// built out of a file on the card -- the shape of the track, the sleeve it
-	// takes its colour from, the tags in the pill -- so a radio station, a
-	// stream from a phone and an audiobook all get the standard one whatever
-	// this says. Studio asks for less and takes all of them.
-	option_note(container, "musicsettings_local_only_note");
-
-	// The sleeve's colour as the accent of the other two arrangements too.
-	settingsrow_toggle(container, "musicsettings_cover_accent", &cover_accent_switch, cover_accent_cb);
-	option_note(container, "musicsettings_cover_accent_note");
-	if (player_cover_accent()) {
-		lv_obj_add_state(cover_accent_switch, LV_STATE_CHECKED);
-	}
+	// Animation intensity (Expressive vs Reduced motion).
+	lv_obj_t *motion_pills = NULL;
+	settingsrow_pills(container, "appearance_motion", &motion_pills);
+	np_motion_pill[0] = settingsrow_pill(motion_pills, "motion_expressive", 0, np_motion_pick_cb);
+	np_motion_pill[1] = settingsrow_pill(motion_pills, "motion_reduced", 1, np_motion_pick_cb);
 
 	// Whose name goes under the title on the now-playing page, in the control
 	// centre and on the screensaver: the album's artist, as the record is
@@ -1604,6 +1663,60 @@ static void build_nowplaying_page(gui_config_t *cfg) {
 	if (config_get_bool("music", "nowplaying_at_boot", false)) {
 		lv_obj_add_state(nowplaying_at_boot_switch, LV_STATE_CHECKED);
 	}
+
+	// First-class Lyrics preferences (Mode A Integrated vs Mode B Full-screen,
+	// remember last presentation, typography scale, and sync offset).
+	settingsrow_heading(container, "lyrics");
+
+	lv_obj_t *lmode_pills = NULL;
+	settingsrow_pills(container, "lyrics_default_view", &lmode_pills);
+	lyrics_mode_pill[0] =
+		settingsrow_pill(lmode_pills, "lyrics_view_integrated", PLAYER_LYRICS_INTEGRATED, lyrics_mode_pick_cb);
+	lyrics_mode_pill[1] =
+		settingsrow_pill(lmode_pills, "lyrics_view_fullscreen", PLAYER_LYRICS_FULLSCREEN, lyrics_mode_pick_cb);
+
+	settingsrow_toggle(container, "lyrics_remember_view", &lyrics_remember_switch, lyrics_remember_cb);
+	option_note(container, "lyrics_remember_view_note");
+	if (player_lyrics_remember_mode()) {
+		lv_obj_add_state(lyrics_remember_switch, LV_STATE_CHECKED);
+	}
+
+	lv_obj_t *lsize_pills = NULL;
+	settingsrow_pills(container, "lyrics_text_size", &lsize_pills);
+	lyrics_size_pill[0] =
+		settingsrow_pill(lsize_pills, "lyrics_size_small", PLAYER_LYRICS_TEXT_SMALL, lyrics_size_pick_cb);
+	lyrics_size_pill[1] =
+		settingsrow_pill(lsize_pills, "lyrics_size_medium", PLAYER_LYRICS_TEXT_MEDIUM, lyrics_size_pick_cb);
+	lyrics_size_pill[2] =
+		settingsrow_pill(lsize_pills, "lyrics_size_large", PLAYER_LYRICS_TEXT_LARGE, lyrics_size_pick_cb);
+
+	lv_obj_t *loff_pills = NULL;
+	lv_obj_t *loff_card = settingsrow_pills(container, "lyrics_offset", &loff_pills);
+	if (loff_card) {
+		lv_obj_t *hdr_row = lv_obj_create(loff_card);
+		lv_obj_remove_style_all(hdr_row);
+		lv_obj_set_size(hdr_row, lv_pct(100), LV_SIZE_CONTENT);
+		lv_obj_move_to_index(hdr_row, 0);
+		lv_obj_t *orig_title = lv_obj_get_child(loff_card, 1);
+		if (orig_title) {
+			lv_obj_set_parent(orig_title, hdr_row);
+			lv_obj_align(orig_title, LV_ALIGN_LEFT_MID, 0, 0);
+		}
+		lyrics_offset_val_label = lv_label_create(hdr_row);
+		lv_label_set_text(lyrics_offset_val_label, "0.0s");
+		lv_obj_add_style(lyrics_offset_val_label, &theme_style_text_dim, 0);
+		lv_obj_set_style_text_font(lyrics_offset_val_label, &font_ui_22, 0);
+		lv_obj_align(lyrics_offset_val_label, LV_ALIGN_RIGHT_MID, 0, 0);
+	}
+	lyrics_offset_step_pill[0] = settingsrow_pill_text(loff_pills, "-0.5s", -500, lyrics_offset_step_cb);
+	lyrics_offset_step_pill[1] = settingsrow_pill_text(loff_pills, "-0.2s", -200, lyrics_offset_step_cb);
+	lyrics_offset_step_pill[2] = settingsrow_pill_text(loff_pills, "0.0s", 0, lyrics_offset_step_cb);
+	lyrics_offset_step_pill[3] = settingsrow_pill_text(loff_pills, "+0.2s", +200, lyrics_offset_step_cb);
+	lyrics_offset_step_pill[4] = settingsrow_pill_text(loff_pills, "+0.5s", +500, lyrics_offset_step_cb);
+
+	nowplaying_settings_refresh();
+	theme_register_refresh(nowplaying_settings_refresh);
+	lv_obj_add_event_cb(nowplaying_screen, nowplaying_loaded_cb, LV_EVENT_SCREEN_LOADED, NULL);
 
 	switcher_attach_back_gesture(nowplaying_screen);
 }

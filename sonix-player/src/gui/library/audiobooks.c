@@ -1350,7 +1350,7 @@ static void paint_choice(lv_obj_t *btn, bool on) {
 		return;
 	}
 	lv_obj_set_style_bg_color(btn, on ? theme()->accent : theme()->surface_pressed, 0);
-	lv_obj_set_style_text_color(lv_obj_get_child(btn, 0), on ? lv_color_white() : theme()->text_primary, 0);
+	lv_obj_set_style_text_color(lv_obj_get_child(btn, 0), on ? theme()->accent_ink : theme()->text_primary, 0);
 }
 
 static void refresh_control_buttons(void) {
@@ -1544,7 +1544,7 @@ static void scan_row_cb(lv_event_t *e) {
 				 "scan", start_scan, NULL);
 }
 
-static lv_obj_t *scan_make_button(const char *text, lv_color_t colour, lv_event_cb_t cb, gui_config_t *cfg) {
+static lv_obj_t *scan_make_button(const char *text, lv_color_t colour, lv_color_t ink, lv_event_cb_t cb, gui_config_t *cfg) {
 	lv_obj_t *button = lv_btn_create(audiobookscan_screen);
 	lv_obj_set_size(button, 240, 68);
 	lv_obj_align(button, LV_ALIGN_BOTTOM_MID, 0, -(cfg->padding * 2));
@@ -1558,7 +1558,7 @@ static lv_obj_t *scan_make_button(const char *text, lv_color_t colour, lv_event_
 	lv_obj_t *label = lv_label_create(button);
 	lv_label_set_text(label, tr(text));
 	lv_obj_set_style_text_font(label, &font_ui_24, 0);
-	lv_obj_set_style_text_color(label, lv_color_white(), 0);
+	lv_obj_set_style_text_color(label, ink, 0);
 	lv_obj_center(label);
 
 	return button;
@@ -1605,8 +1605,8 @@ static void build_scan_page(gui_config_t *cfg) {
 	lv_obj_add_style(scan_status_label, &theme_style_text, 0);
 	lv_obj_set_style_text_font(scan_status_label, &font_ui_26, 0);
 
-	scan_cancel_button = scan_make_button("cancel", lv_color_make(210, 66, 58), scan_cancel_cb, cfg);
-	scan_ok_button = scan_make_button("ok", theme()->accent, scan_ok_cb, cfg);
+	scan_cancel_button = scan_make_button("cancel", lv_color_make(210, 66, 58), lv_color_white(), scan_cancel_cb, cfg);
+	scan_ok_button = scan_make_button("ok", theme()->accent, theme()->accent_ink, scan_ok_cb, cfg);
 	lv_obj_set_hidden(scan_ok_button, true);
 
 	scan_poll_timer = lv_timer_create(scan_poll_cb, SCAN_POLL_MS, NULL);

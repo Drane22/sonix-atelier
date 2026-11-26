@@ -10,43 +10,53 @@ lv_style_t theme_style_screen;
 lv_style_t theme_style_panel;
 lv_style_t theme_style_card;
 lv_style_t theme_style_card_pressed;
+lv_style_t theme_style_card_elevated;
+lv_style_t theme_style_border;
 lv_style_t theme_style_text;
 lv_style_t theme_style_text_dim;
 lv_style_t theme_style_icon;
 lv_style_t theme_style_switch;		   // switch track, off state
 lv_style_t theme_style_switch_checked; // switch indicator, on state
 lv_style_t theme_style_accent_bg;	   // anything that must follow the accent
+lv_style_t theme_style_accent_ink;	   // text/icons drawn over `theme_style_accent_bg`
 lv_style_t theme_style_slider_track;   // a slider's unfilled part
 
-// GNOME Adwaita (libadwaita) colours, dark variant: window #242424, cards
-// #303030 (white at 8%% over the window), accent blue #3584e4. Secondary text
-// is white at 55%%, flattened against the card colour.
+// Midnight Titanium — Dark (default): deep obsidian canvas #0B0E12, titanium
+// surface #141A21, elevated card #1C242E, hairline border #29323D, Ice Blue
+// accent #9CC9F2.
 static theme_palette_t palette_dark = {
-	.screen_bg = LV_COLOR_MAKE(36, 36, 36),
-	.surface = LV_COLOR_MAKE(48, 48, 48),
-	.surface_pressed = LV_COLOR_MAKE(64, 64, 64),
-	.panel = LV_COLOR_MAKE(30, 30, 30),
-	.cover_bg = LV_COLOR_MAKE(30, 30, 30),
-	.text_primary = LV_COLOR_MAKE(255, 255, 255),
-	.text_secondary = LV_COLOR_MAKE(160, 160, 160),
-	.accent = LV_COLOR_MAKE(53, 132, 228),
+	.screen_bg = LV_COLOR_MAKE(11, 14, 18),		   // #0B0E12
+	.surface = LV_COLOR_MAKE(20, 26, 33),		   // #141A21
+	.surface_pressed = LV_COLOR_MAKE(34, 43, 55),  // #222B37
+	.elevated = LV_COLOR_MAKE(28, 36, 46),		   // #1C242E
+	.border = LV_COLOR_MAKE(41, 50, 61),		   // #29323D
+	.panel = LV_COLOR_MAKE(17, 22, 28),			   // #11161C
+	.cover_bg = LV_COLOR_MAKE(28, 36, 46),		   // #1C242E
+	.text_primary = LV_COLOR_MAKE(244, 246, 248),  // #F4F6F8
+	.text_secondary = LV_COLOR_MAKE(152, 163, 175),// #98A3AF
+	.accent = LV_COLOR_MAKE(156, 201, 242),		   // #9CC9F2
+	.accent_pressed = LV_COLOR_MAKE(121, 181, 232),// #79B5E8
+	.highlight = LV_COLOR_MAKE(215, 235, 255),	   // #D7EBFF
+	.accent_ink = LV_COLOR_MAKE(11, 14, 18),	   // #0B0E12
 	.dark = true,
 };
 
-// Adwaita light: window #fafafa, cards white, pressed = black at 8%%, text
-// black at 80%%. The accent is the same #3584e4 in both variants.
+// Porcelain — Light: crisp warm-cool neutral #F4F5F7, pure white cards,
+// elevated #EAEDF1, border #D8DEE5, slate text #171B22 / #697482.
 static theme_palette_t palette_light = {
-	// The window is pushed further from white than stock Adwaita's #fafafa:
-	// on this panel white cards on a #fafafa window are indistinguishable, so
-	// the window is a light grey and the pressed state a step deeper.
-	.screen_bg = LV_COLOR_MAKE(236, 237, 240),
-	.surface = LV_COLOR_MAKE(255, 255, 255),
-	.surface_pressed = LV_COLOR_MAKE(221, 223, 228),
-	.panel = LV_COLOR_MAKE(255, 255, 255),
-	.cover_bg = LV_COLOR_MAKE(224, 226, 230),
-	.text_primary = LV_COLOR_MAKE(50, 50, 50),
-	.text_secondary = LV_COLOR_MAKE(115, 115, 115),
-	.accent = LV_COLOR_MAKE(53, 132, 228),
+	.screen_bg = LV_COLOR_MAKE(244, 245, 247),	   // #F4F5F7
+	.surface = LV_COLOR_MAKE(255, 255, 255),	   // #FFFFFF
+	.surface_pressed = LV_COLOR_MAKE(225, 229, 236),// #E1E5EC
+	.elevated = LV_COLOR_MAKE(234, 237, 241),	   // #EAEDF1
+	.border = LV_COLOR_MAKE(216, 222, 229),		   // #D8DEE5
+	.panel = LV_COLOR_MAKE(255, 255, 255),		   // #FFFFFF
+	.cover_bg = LV_COLOR_MAKE(234, 237, 241),	   // #EAEDF1
+	.text_primary = LV_COLOR_MAKE(23, 27, 34),	   // #171B22
+	.text_secondary = LV_COLOR_MAKE(105, 116, 130),// #697482
+	.accent = LV_COLOR_MAKE(156, 201, 242),		   // #9CC9F2
+	.accent_pressed = LV_COLOR_MAKE(121, 181, 232),// #79B5E8
+	.highlight = LV_COLOR_MAKE(215, 235, 255),	   // #D7EBFF
+	.accent_ink = LV_COLOR_MAKE(11, 14, 18),	   // #0B0E12
 	.dark = false,
 };
 
@@ -59,6 +69,7 @@ static bool dark_selected = true;
 // -- borrow the accent's hue, the way Material You colours a system from one
 // seed. Off by default, remembered in the config.
 static bool dynamic_tint;
+static bool reduced_motion;
 
 // The tinted copy of whichever preset is chosen. Rebuilt on every theme,
 // accent or tint change; `active` points here while the tint is on.
@@ -66,17 +77,46 @@ static theme_palette_t tinted;
 
 static theme_palette_t *active = &palette_dark;
 
-// The accent presets, Adwaita's named accents, ordered as requested: blue
-// (the default), then warm to cool -- orange, yellow, green, purple, pink.
+// The accent presets, ordered with Ice Blue (#9CC9F2) as the default, then
+// warm to cool -- orange, yellow, green, purple, pink.
 static const lv_color_t ACCENT_COLORS[THEME_ACCENT_COUNT] = {
-	LV_COLOR_MAKE(53, 132, 228), // blue (#3584e4, the default)
-	LV_COLOR_MAKE(255, 120, 0),  // orange (#ff7800)
-	LV_COLOR_MAKE(229, 165, 10), // yellow (#e5a50a)
-	LV_COLOR_MAKE(46, 194, 126), // green (#2ec27e)
-	LV_COLOR_MAKE(145, 65, 172), // purple (#9141ac)
-	LV_COLOR_MAKE(213, 97, 153), // pink (#d56199)
+	LV_COLOR_MAKE(156, 201, 242), // ice blue (#9CC9F2, the default)
+	LV_COLOR_MAKE(255, 120, 0),	  // orange (#ff7800)
+	LV_COLOR_MAKE(229, 165, 10),  // yellow (#e5a50a)
+	LV_COLOR_MAKE(46, 194, 126),  // green (#2ec27e)
+	LV_COLOR_MAKE(145, 65, 172),  // purple (#9141ac)
+	LV_COLOR_MAKE(213, 97, 153),  // pink (#d56199)
 };
 static int accent_index;
+
+static lv_color_t mix_color(lv_color_t a, lv_color_t b, float t) {
+	return lv_color_make(
+		(uint8_t)((float)a.red + ((float)b.red - (float)a.red) * t + 0.5f),
+		(uint8_t)((float)a.green + ((float)b.green - (float)a.green) * t + 0.5f),
+		(uint8_t)((float)a.blue + ((float)b.blue - (float)a.blue) * t + 0.5f));
+}
+
+static lv_color_t contrast_ink_for(lv_color_t bg) {
+	int luma = (299 * bg.red + 587 * bg.green + 114 * bg.blue) / 1000;
+	return luma >= 155 ? lv_color_make(11, 14, 18) : lv_color_white();
+}
+
+static void set_palette_accent(int index) {
+	lv_color_t acc = ACCENT_COLORS[index];
+	lv_color_t pressed = (index == 0) ? lv_color_make(121, 181, 232) : mix_color(acc, lv_color_black(), 0.18f);
+	lv_color_t hl = (index == 0) ? lv_color_make(215, 235, 255) : mix_color(acc, lv_color_white(), 0.45f);
+	lv_color_t ink = contrast_ink_for(acc);
+
+	palette_dark.accent = acc;
+	palette_dark.accent_pressed = pressed;
+	palette_dark.highlight = hl;
+	palette_dark.accent_ink = ink;
+
+	palette_light.accent = acc;
+	palette_light.accent_pressed = pressed;
+	palette_light.highlight = hl;
+	palette_light.accent_ink = ink;
+}
 
 lv_color_t theme_accent_preset(int index) {
 	if (index < 0 || index >= THEME_ACCENT_COUNT) {
@@ -158,6 +198,8 @@ static void rebuild_active(void) {
 	tinted.screen_bg = tint_with(base->screen_bg, base->accent, strength);
 	tinted.surface = tint_with(base->surface, base->accent, strength);
 	tinted.surface_pressed = tint_with(base->surface_pressed, base->accent, strength);
+	tinted.elevated = tint_with(base->elevated, base->accent, strength);
+	tinted.border = tint_with(base->border, base->accent, strength);
 	tinted.panel = tint_with(base->panel, base->accent, strength);
 	tinted.cover_bg = tint_with(base->cover_bg, base->accent, strength);
 	// Text keeps the plain colours: the monochrome icons are recoloured with
@@ -176,6 +218,12 @@ static void apply_palette(void) {
 
 	lv_style_set_bg_color(&theme_style_card_pressed, active->surface_pressed);
 
+	lv_style_set_bg_color(&theme_style_card_elevated, active->elevated);
+	lv_style_set_text_color(&theme_style_card_elevated, active->text_primary);
+	lv_style_set_border_color(&theme_style_card_elevated, active->border);
+
+	lv_style_set_border_color(&theme_style_border, active->border);
+
 	lv_style_set_text_color(&theme_style_text, active->text_primary);
 	lv_style_set_text_color(&theme_style_text_dim, active->text_secondary);
 
@@ -185,6 +233,8 @@ static void apply_palette(void) {
 	lv_style_set_bg_color(&theme_style_switch_checked, active->accent);
 
 	lv_style_set_bg_color(&theme_style_accent_bg, active->accent);
+	lv_style_set_text_color(&theme_style_accent_ink, active->accent_ink);
+	lv_style_set_image_recolor(&theme_style_accent_ink, active->accent_ink);
 	lv_style_set_bg_color(&theme_style_slider_track, active->text_secondary);
 }
 
@@ -205,6 +255,15 @@ void theme_init(void) {
 	lv_style_set_transform_width(&theme_style_card_pressed, 0);
 	lv_style_set_transform_height(&theme_style_card_pressed, 0);
 
+	lv_style_init(&theme_style_card_elevated);
+	lv_style_set_bg_opa(&theme_style_card_elevated, LV_OPA_COVER);
+	lv_style_set_border_width(&theme_style_card_elevated, 1);
+	lv_style_set_border_opa(&theme_style_card_elevated, LV_OPA_COVER);
+
+	lv_style_init(&theme_style_border);
+	lv_style_set_border_width(&theme_style_border, 1);
+	lv_style_set_border_opa(&theme_style_border, LV_OPA_COVER);
+
 	lv_style_init(&theme_style_text);
 	lv_style_init(&theme_style_text_dim);
 
@@ -218,6 +277,8 @@ void theme_init(void) {
 
 	lv_style_init(&theme_style_accent_bg);
 	lv_style_set_bg_opa(&theme_style_accent_bg, LV_OPA_COVER);
+	lv_style_init(&theme_style_accent_ink);
+	lv_style_set_image_recolor_opa(&theme_style_accent_ink, LV_OPA_COVER);
 	lv_style_init(&theme_style_slider_track);
 	lv_style_set_bg_opa(&theme_style_slider_track, LV_OPA_40);
 	lv_style_set_radius(&theme_style_slider_track, LV_RADIUS_CIRCLE);
@@ -230,10 +291,10 @@ void theme_init(void) {
 	if (accent_index < 0 || accent_index >= THEME_ACCENT_COUNT) {
 		accent_index = 0;
 	}
-	palette_dark.accent = ACCENT_COLORS[accent_index];
-	palette_light.accent = ACCENT_COLORS[accent_index];
+	set_palette_accent(accent_index);
 
 	dynamic_tint = config_get_bool("ui", "dynamic_tint", false);
+	reduced_motion = config_get_bool("ui", "reduced_motion", false);
 
 	rebuild_active();
 	apply_palette();
@@ -393,8 +454,7 @@ void theme_set_accent(int index) {
 		index = 0;
 	}
 	accent_index = index;
-	palette_dark.accent = ACCENT_COLORS[index];
-	palette_light.accent = ACCENT_COLORS[index];
+	set_palette_accent(index);
 	rebuild_active(); // the tint is drawn from the accent, so it moves with it
 	apply_palette();
 
@@ -419,5 +479,17 @@ void theme_set_dynamic_tint(bool on) {
 	config_set_bool("ui", "dynamic_tint", on);
 	config_save();
 
+	refresh_all();
+}
+
+bool theme_reduced_motion(void) { return reduced_motion; }
+
+void theme_set_reduced_motion(bool reduced) {
+	if (reduced_motion == reduced) {
+		return;
+	}
+	reduced_motion = reduced;
+	config_set_bool("ui", "reduced_motion", reduced);
+	config_save();
 	refresh_all();
 }

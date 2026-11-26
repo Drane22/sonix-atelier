@@ -86,7 +86,11 @@ static lv_obj_t *make_button(lv_obj_t *parent, const char *text, bool accent, lv
 	lv_obj_t *label = lv_label_create(btn);
 	lv_label_set_text(label, tr(text));
 	lv_obj_set_style_text_font(label, &font_ui_24, 0);
-	lv_obj_set_style_text_color(label, accent ? lv_color_white() : theme()->text_primary, 0);
+	if (accent) {
+		lv_obj_add_style(label, &theme_style_accent_ink, 0);
+	} else {
+		lv_obj_set_style_text_color(label, theme()->text_primary, 0);
+	}
 	lv_obj_center(label);
 
 	if (label_out) {
