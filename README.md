@@ -1,4 +1,4 @@
-﻿# Sonix Player
+# Sonix Player
 
 > [!Note]
 > THIS IS THE SUCCESSOR TO M4ttia's SONIX REPO
@@ -9,6 +9,105 @@ A replacement player for the **HiBy R3 Pro II** and the **HiBy R1**, written on
 LVGL.
 
 Everything it can do is in **[FEATURES.md](FEATURES.md)**.
+
+<p align="center">
+  <img src="previews/atelier/startup.png" width="200" alt="Sonix Atelier startup">
+  <img src="previews/atelier/ambient-screens/15-r1-atelier-home-miniplayer.png" width="200" alt="Atelier home with mini-player">
+  <img src="previews/atelier/ambient-screens/01-r1-adaptive-nowplaying.png" width="200" alt="Ambient Now Playing">
+  <img src="previews/atelier/arcade.png" width="200" alt="Games hub">
+</p>
+
+---
+
+## Design: Sonix Atelier
+
+The interface is called **Sonix Atelier**. It uses dark surfaces, the Inter
+typeface and pixel-art scenery, and the player screen takes its colours from
+the album artwork.
+All screenshots below come from the SDL simulator, at the real panel size.
+
+### Home
+
+A home screen with a dusk wallpaper, a mini-player card that tracks the
+current song (cover, title, progress, play/pause), shortcuts to Streaming,
+Audiobooks and Games, and a dock for Music, Wireless, More and Settings. A
+short logo animation plays at power-on and can be turned off in Settings >
+Appearance.
+
+| Startup | Home, idle | Home, playing |
+|:---:|:---:|:---:|
+| <img src="previews/atelier/startup.png" width="240"> | <img src="previews/atelier/home.png" width="240"> | <img src="previews/atelier/ambient-screens/15-r1-atelier-home-miniplayer.png" width="240"> |
+
+### Ambient Now Playing
+
+The full-screen blur and the permanent Up Next card are gone. In their place:
+
+- **Adaptive palette.** The background and accent come from the cover, with
+  text contrast checked on bright, dark, colourless and missing artwork.
+  **Fixed** mode keeps the theme accent instead (Ice `#B9DCFA` on slate by
+  default).
+- **Swipeable cover carousel.** Drag the cover to show the previous or next
+  track, with an Up Next hint.
+- **72-bar waveform** as the progress bar, with codec and bit depth under it.
+- **Reduced motion** setting that turns off the continuous animations to save
+  CPU.
+
+![Before / after](previews/atelier/ambient-before-after-r1.png)
+
+![Now Playing variants on the R1](previews/atelier/ambient-nowplaying-r1.png)
+
+<p align="center">
+  <img src="previews/atelier/ambient-carousel-swipe.gif" width="240" alt="Carousel swipe">
+</p>
+
+### Lyrics and queue
+
+- **Mode A (integrated):** synced lyrics take the place of the cover, and
+  the controls stay in place.
+- **Mode B (full screen):** larger text, a ± sync offset in 0.1 s steps, an
+  Aa text size control and a *Resume Sync* button after you scroll by hand.
+- Unsynced `.txt` lyrics, an empty state with a one-tap LRCLIB search, and a
+  redesigned queue.
+
+![Lyrics, queue and home on the R1](previews/atelier/ambient-lyrics-queue-r1.png)
+
+<p align="center">
+  <img src="previews/atelier/ambient-lyrics-sync.gif" width="240" alt="Synced lyrics">
+</p>
+
+### Both panels
+
+The same layouts fit the 480×720 R3 Pro II without scrolling vertically.
+
+![R3 Pro II layouts](previews/atelier/ambient-r3pii.png)
+
+### Atelier Arcade
+
+A new **Games** hub with original touch games, each with its own painted
+scenery, sound effects, best scores and pause menu: **Tower Blast**, **Block
+Mosaic**, **2048** (Classic and Challenge), **Breakwater**, **Orbit**,
+**Prism** and **Atelier Word**, a daily five-letter puzzle. Flappy Bird and
+Gearboy (Game Boy / Game Boy Color) are still there.
+
+| R1 (480×800) | R3 Pro II (480×720) |
+|:---:|:---:|
+| ![Arcade on R1](previews/atelier/arcade-r1.png) | ![Arcade on R3 Pro II](previews/atelier/arcade-r3pii.png) |
+
+| Tower Blast | Prism | Atelier Word |
+|:---:|:---:|:---:|
+| <img src="previews/atelier/tower-floor-break.gif" width="200"> | <img src="previews/atelier/prism-double-gate.gif" width="200"> | <img src="previews/atelier/word-reveal.gif" width="200"> |
+
+<details>
+<summary>The previous design, for comparison</summary>
+
+![Before, R1](previews/atelier/before-r1.png)
+
+![Glass player, R1](previews/atelier/player-glass-r1.png)
+
+</details>
+
+Each screen is also saved on its own in
+[`previews/atelier/ambient-screens/`](previews/atelier/ambient-screens).
 
 ## Install
 
@@ -140,6 +239,25 @@ Fonts are looked for in `usr/resource/sonix/fonts` first and fall back to
 ./sonix_player_host
 ```
 
+Or, from the repository root, use the launcher. It builds the simulator if
+needed and keeps its card and settings in `.sim-data/`:
+
+```bash
+./run-simulator.sh            # R1 panel (480x800)
+./run-simulator.sh r3         # R3 Pro II panel (480x720)
+./run-simulator.sh r1 build   # rebuild first
+```
+
+### Tests
+
+```bash
+cd sonix-player
+make test-nowplaying          # ambient palette, lyrics sync, queue lookahead
+make test-arcade-contacts     # Tower Blast floors, Prism gate clearances
+cd ../sonix-packer
+python3 -m unittest discover -s tests   # verify-upt.sh package checks
+```
+
 The window is the panel of the player named in `system-info.json`: 480x720 for
 the R3 Pro II, 480x800 for the R1, and 480x720 when the file is missing. The
 mouse is the finger, and dragging scrolls.
@@ -239,6 +357,7 @@ The packer looks only next to itself:
 ```
 sonix-packer/
 ├── sonix_firmware_packer.sh
+├── verify-upt.sh            checks the recovery package before installation
 ├── r3proii_original.upt     the stock firmware of the R3 Pro II, from HiBy
 ├── r1_original.upt          the stock firmware of the R1, from HiBy
 ├── sonix_player             the binary from `make target`
@@ -330,6 +449,16 @@ perl as well, which macOS and most Linux systems already have: it reads the
 stock `sa_sound_hbc3000.ko` (see step 5).
 
 ### Build
+
+For an R1 already running Sonix v1.3.1, build from that release to preserve its kernel, radio drivers, and boot scripts. Place the binary from `make target` beside the packer. Download the R1 release image into a separate directory so the output `sonix-packer/r1.upt` has its own path. The packer checks the published base digest and verifies the finished archive. [Sonix v1.3.1 release](https://github.com/Tartarus6/sonix-player/releases/tag/v1.3.1)
+
+```bash
+./sonix_firmware_packer.sh --r1-base /path/to/v1.3.1/r1.upt
+```
+
+HiBy R1 stock 2.0 selects between Broadcom and AIC wireless hardware. The current Sonix R1 overlay supports Broadcom, so the stock build stops if it finds that selector.
+
+For supported stock images, run
 
 ```bash
 ./sonix_firmware_packer.sh
@@ -435,7 +564,7 @@ the overlay - any other file need to be in the respective folder mirroring the r
 4. Let it flash - it will say "Upgrading..." then "Succeeded" and reboot by itself.
 
 > It is recommended to **charge above 30%** first. 
-**Recovery from a failed flash:** If something goes wrong, you can always restore by flashing the original stock firmware from HiBy's website using the same procedure.
+The SD update procedure requires a functioning updater. Keep the original firmware available before starting.
 
 
 ## Generated files
@@ -513,6 +642,7 @@ sonix-player/
 │   │   │   └── miniz/               reads a ROM straight out of a .zip
 │   │   │
 │   │   ├── gui/                     
+│   │   │   ├── arcade/              Atelier Arcade: games hub, shared framebuffer/scene/sfx shell and the games
 │   │   │   ├── audio/               EQ, PEQ, AutoEq, MSEB, the DAC page and the metronome
 │   │   │   ├── bluetooth/           pairing, codec, AirPods, receiver mode
 │   │   │   ├── ebook/               EPUB reader: pages, shelf, bar, bookmarks, themes
@@ -564,6 +694,8 @@ sonix-player/
 │   ├── lv_conf.h                    
 │   └── Makefile                     
 │
+├── previews/atelier/                design screenshots and GIFs used in this README
+├── run-simulator.sh                 builds and launches the SDL simulator
 ├── FEATURES.md                      
 ├── LICENSE                          
 ├── PATCHES.md                       
