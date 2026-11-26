@@ -41,6 +41,8 @@
 	{FONT_DIR "/" base ".ttf", FONT_DIR "/" base ".otf", FONT_DIR_FALLBACK "/" base ".ttf",                          \
 	 FONT_DIR_FALLBACK "/" base ".otf", NULL}
 
+static const char *const FONT_INTER_REGULAR_FILES[] = FACE_FILES("inter-regular");
+static const char *const FONT_INTER_BOLD_FILES[] = FACE_FILES("inter-bold");
 static const char *const FONT_DEFAULT_FILES[] = FACE_FILES("default");
 static const char *const FONT_BOLD_FILES[] = FACE_FILES("bold");
 
@@ -105,7 +107,9 @@ lv_font_t font_ui_24;
 lv_font_t font_ui_24_bold;
 lv_font_t font_ui_26;
 lv_font_t font_ui_28;
+lv_font_t font_ui_28_bold;
 lv_font_t font_ui_32;
+lv_font_t font_ui_32_bold;
 lv_font_t font_ui_36_bold;
 lv_font_t font_ui_64_bold;
 lv_font_t font_ui_72;
@@ -120,8 +124,9 @@ static const ui_font_t ui_fonts[] = {
 	{&font_ui_14, 14, false}, {&font_ui_16, 16, false}, {&font_ui_18, 18, false},
 	{&font_ui_20, 20, false}, {&font_ui_22, 22, false}, {&font_ui_24, 24, false},
 	{&font_ui_26, 26, false}, {&font_ui_28, 28, false}, {&font_ui_32, 32, false},
-	{&font_ui_72, 72, false}, {&font_ui_20_bold, 20, true}, {&font_ui_22_bold, 22, true}, {&font_ui_24_bold, 24, true}, {&font_ui_36_bold, 36, true},
-	{&font_ui_64_bold, 64, true},
+	{&font_ui_72, 72, false}, {&font_ui_20_bold, 20, true}, {&font_ui_22_bold, 22, true},
+	{&font_ui_24_bold, 24, true}, {&font_ui_28_bold, 28, true}, {&font_ui_32_bold, 32, true},
+	{&font_ui_36_bold, 36, true}, {&font_ui_64_bold, 64, true},
 };
 
 #define UI_FONT_COUNT (sizeof(ui_fonts) / sizeof(ui_fonts[0]))
@@ -168,6 +173,8 @@ static bool set_built[2];
 
 static const char *regular_file;
 static const char *bold_file;
+static const char *fallback_regular_file;
+static const char *fallback_bold_file;
 
 static lv_font_t *open_face(const char *path, int size) {
 	if (access(path, R_OK) != 0) {
@@ -267,6 +274,23 @@ static lv_font_t *open_chain(const ui_font_t *ui, int size) {
 		japanese.used = true;
 	}
 
+	// When Inter leads the chain, chain MiSans behind Rodin (and ahead of the
+	// script-specific faces) so Simplified Chinese, symbols, and missing kanji
+	// resolve identically to stock firmware.
+	if (fallback_regular_file) {
+		lv_font_t *cjk = NULL;
+		if (ui->bold && fallback_bold_file) {
+			cjk = open_face(fallback_bold_file, size);
+		}
+		if (!cjk) {
+			cjk = open_face(fallback_regular_file, size);
+		}
+		if (cjk) {
+			tail->fallback = cjk;
+			tail = cjk;
+		}
+	}
+
 	for (size_t i = 0; i < SCRIPT_COUNT; i++) {
 		script_face_t *script = &scripts[i];
 		lv_font_t *face = NULL;
@@ -286,8 +310,8 @@ static lv_font_t *open_chain(const ui_font_t *ui, int size) {
 		}
 	}
 
-	// The main face again, answering everything: the kanji Rodin lacks.
-	if (rodin) {
+	// The main face again when MiSans is the head, answering the kanji Rodin lacks.
+	if (rodin && !fallback_regular_file) {
 		lv_font_t *again = NULL;
 		if (ui->bold && bold_file) {
 			again = open_face(bold_file, size);
@@ -326,8 +350,20 @@ static bool build_set(bool large) {
 }
 
 bool fonts_init(void) {
-	regular_file = first_present(FONT_DEFAULT_FILES);
-	bold_file = first_present(FONT_BOLD_FILES);
+	fallback_regular_file = first_present(FONT_DEFAULT_FILES);
+	fallback_bold_file = first_present(FONT_BOLD_FILES);
+
+	const char *inter_regular = first_present(FONT_INTER_REGULAR_FILES);
+	const char *inter_bold = first_present(FONT_INTER_BOLD_FILES);
+	if (inter_regular) {
+		regular_file = inter_regular;
+		bold_file = inter_bold ? inter_bold : inter_regular;
+	} else {
+		regular_file = fallback_regular_file;
+		bold_file = fallback_bold_file;
+		fallback_regular_file = NULL;
+		fallback_bold_file = NULL;
+	}
 	for (size_t i = 0; i < SCRIPT_COUNT; i++) {
 		scripts[i].regular = first_present(scripts[i].regular_files);
 		scripts[i].bold = first_present(scripts[i].bold_files);

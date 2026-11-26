@@ -56,7 +56,9 @@
 	extern lv_font_t font_ui_24_bold;                                                                                  \
 	extern lv_font_t font_ui_26;                                                                                       \
 	extern lv_font_t font_ui_28;                                                                                       \
-	extern lv_font_t font_ui_32;
+	extern lv_font_t font_ui_28_bold;                                                                                  \
+	extern lv_font_t font_ui_32;                                                                                       \
+	extern lv_font_t font_ui_32_bold;
 
 /* Used by every widget that does not ask for a specific font. */
 #define LV_FONT_DEFAULT &font_ui_14
