@@ -117,6 +117,7 @@ TARGET_CFLAGS = $(CFLAGS) -march=mips32r2 -mno-madd4 -mplt -ffunction-sections -
 TARGET_DEFAULT_OPT = -O2
 TARGET_HOT_OPT = -O3
 TARGET_HOT_PATTERNS = build_target/system/audio/% build_target/system/decode/% build_target/gb/% \
+					  build_target/gui/arcade/% build_target/gui/flappybird/% \
 					  build_target/lvgl/src/draw/sw/% build_target/lvgl/src/misc/lv_color%
 TARGET_OPT = $(TARGET_DEFAULT_OPT)
 $(TARGET_HOT_PATTERNS): TARGET_OPT = $(TARGET_HOT_OPT)
@@ -214,7 +215,7 @@ AUDIO_LIBS = $(OPUSFILE_LIB) $(OPUS_LIB) $(OGG_LIB) $(WAVPACK_LIB)
 # Source files. src/gb holds a .c as well (the miniz shell) alongside the C++
 # core, so both searches reach into it.
 APP_SRCS := $(shell find src -name '*.c')
-LVGL_SRCS = $(shell find $(LVGL_DIR)/src -type f -name '*.c')
+LVGL_SRCS := $(shell find $(LVGL_DIR)/src -type f -name '*.c')
 
 # The C++ here is the Game Boy core under src/gb/core plus its facade. Separate
 # list because it takes different flags, and the link goes through the C++
@@ -224,9 +225,9 @@ HOST_LD = $(CXX)
 TARGET_LD = $(CROSS_CXX)
 
 # Object files
-HOST_OBJS = $(APP_SRCS:src/%.c=build_host/%.o) $(APP_CXX_SRCS:src/%.cpp=build_host/%.opp) \
+HOST_OBJS = build_host/gui/arcade/scenery.o $(APP_SRCS:src/%.c=build_host/%.o) $(APP_CXX_SRCS:src/%.cpp=build_host/%.opp) \
 			$(LVGL_SRCS:$(LVGL_DIR)/%.c=build_host/lvgl/%.o)
-TARGET_OBJS = $(APP_SRCS:src/%.c=build_target/%.o) $(APP_CXX_SRCS:src/%.cpp=build_target/%.opp) \
+TARGET_OBJS = build_target/gui/arcade/scenery.o $(APP_SRCS:src/%.c=build_target/%.o) $(APP_CXX_SRCS:src/%.cpp=build_target/%.opp) \
 			  $(LVGL_SRCS:$(LVGL_DIR)/%.c=build_target/lvgl/%.o)
 
 .PHONY: all host target clean compile_commands.json
@@ -261,6 +262,34 @@ $(STREAMKEYS_KEY_H): FORCE
 		else echo "streamkeys: no $(STREAMKEYS_KEY), this build reads only a plain streaming-keys.ini"; fi; fi
 build_host/system/streaming/streamkeys.o build_target/system/streaming/streamkeys.o: $(STREAMKEYS_KEY_H)
 
+.PHONY: test-arcade-contacts test-nowplaying
+test-arcade-contacts:
+	@mkdir -p build_host/tests
+	$(CC) -O2 -I. -Ilvgl -DLV_CONF_INCLUDE_SIMPLE=1 -ffunction-sections -fdata-sections \
+		tests/arcade_contacts.c src/gui/arcade/arcade_fb.c lvgl/src/misc/lv_color.c \
+		-Wl,--gc-sections -lm -o build_host/tests/arcade_contacts
+	./build_host/tests/arcade_contacts
+
+test-nowplaying:
+	@mkdir -p build_host/tests
+	$(CC) -O2 -Wall -I. -Ilvgl -DLV_CONF_INCLUDE_SIMPLE=1 -ffunction-sections -fdata-sections \
+		tests/ambient_nowplaying_tests.c \
+		src/gui/nowplaying/ambient_palette.c \
+		src/system/library/lyrics.c \
+		src/system/playback/playlist.c \
+		lvgl/src/misc/lv_color.c \
+		-Wl,--gc-sections -lm -o build_host/tests/ambient_nowplaying_tests
+	./build_host/tests/ambient_nowplaying_tests
+
+ARCADE_PAINTINGS := $(wildcard assets/arcade/*.rgb565) assets/player/sleeve.rgb565
+build_host/gui/arcade/scenery.o: src/gui/arcade/scenery.S $(ARCADE_PAINTINGS)
+	@mkdir -p $(dir $@)
+	$(CC) -c $< -o $@
+
+build_target/gui/arcade/scenery.o: src/gui/arcade/scenery.S $(ARCADE_PAINTINGS)
+	@mkdir -p $(dir $@)
+	$(CROSS_CC) $(TARGET_CFLAGS) -c $< -o $@
+
 build_host/%.o: src/%.c
 	@mkdir -p $(dir $@)
 	$(CC) $(HOST_CFLAGS) -c $< -o $@
@@ -274,6 +303,8 @@ build_host/lvgl/%.o: $(LVGL_DIR)/%.c
 	$(CC) $(HOST_CFLAGS) -c $< -o $@
 
 target: $(TARGET_BIN) $(LAUNCH_BIN) compile_commands.json
+
+.DELETE_ON_ERROR: $(TARGET_BIN)
 
 $(TARGET_BIN): $(TARGET_OBJS)
 	$(TARGET_LD) -o $@ $(TARGET_OBJS) $(TARGET_LDFLAGS)
@@ -347,10 +378,11 @@ DEVICE_GLIBC_MINOR = 22
 .PHONY: check-abi
 check-abi:
 	@if [ ! -x "$(CROSS_READELF)" ]; then \
-		echo "check-abi: $(CROSS_READELF) is not there, check skipped"; \
-		exit 0; \
+		echo "check-abi: $(CROSS_READELF) is required" >&2; \
+		exit 1; \
 	fi; \
-	bad=$$($(CROSS_READELF) --dyn-syms -W $(TARGET_BIN) 2>/dev/null \
+	symbols=$$($(CROSS_READELF) --dyn-syms -W $(TARGET_BIN)) || exit 1; \
+	bad=$$(printf '%s\n' "$$symbols" \
 		| awk '{ for (i = 1; i <= NF; i++) if (match($$i, /@GLIBC_[0-9.]+$$/)) { \
 			ver = substr($$i, RSTART + 7); n = split(ver, v, "."); \
 			if (v[1] > $(DEVICE_GLIBC_MAJOR) || (v[1] == $(DEVICE_GLIBC_MAJOR) && v[2] > $(DEVICE_GLIBC_MINOR))) print "  " $$i; \
