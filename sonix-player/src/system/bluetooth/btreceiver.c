@@ -198,7 +198,8 @@ static void publish_format(const char *device, const bt_stream_t *info) {
 // the capture loop
 // ---------------------------------------------------------------------------
 
-static snd_pcm_t *open_capture(const char *mac, unsigned rate, unsigned channels, unsigned bits) {
+static snd_pcm_t *open_capture(const char *mac, unsigned rate, unsigned channels, unsigned bits,
+							   snd_pcm_format_t *format) {
 	char device[96];
 	snprintf(device, sizeof(device), "bluealsa:DEV=%s,PROFILE=a2dp", mac);
 
@@ -213,10 +214,19 @@ static snd_pcm_t *open_capture(const char *mac, unsigned rate, unsigned channels
 		return NULL;
 	}
 
-	snd_pcm_format_t format = (bits == 32) ? SND_PCM_FORMAT_S32_LE : SND_PCM_FORMAT_S16_LE;
-	err = snd_pcm_set_params(pcm, format, SND_PCM_ACCESS_RW_INTERLEAVED, (unsigned)channels, (unsigned)rate,
-							 0, // no resampling: the rate is the sender's and has to stay it
-							 (unsigned)capture_ms() * 1000u);
+	switch (bits) {
+	case 8: *format = SND_PCM_FORMAT_U8; break;
+	case 24: *format = SND_PCM_FORMAT_S24_3LE; break;
+	case 32: *format = SND_PCM_FORMAT_S32_LE; break;
+	default: *format = SND_PCM_FORMAT_S16_LE; break;
+	}
+	unsigned latency = (unsigned)capture_ms() * 1000u;
+	err = snd_pcm_set_params(pcm, *format, SND_PCM_ACCESS_RW_INTERLEAVED, channels, rate, 0, latency);
+	if (err < 0 && bits == 24) {
+		// BlueALSA also exposes 24-bit samples in four-byte containers.
+		*format = SND_PCM_FORMAT_S24_LE;
+		err = snd_pcm_set_params(pcm, *format, SND_PCM_ACCESS_RW_INTERLEAVED, channels, rate, 0, latency);
+	}
 	if (err < 0) {
 		fprintf(stderr, "btreceiver: %u Hz %u ch %u bit refused: %s\n", rate, channels, bits, snd_strerror(err));
 		snd_pcm_close(pcm);
@@ -270,7 +280,8 @@ static session_t capture_session(const char *mac, const char *name, bool may_gue
 	unsigned in_bits = info.bits ? info.bits : FALLBACK_BITS;
 	publish_format(name, &info);
 
-	snd_pcm_t *pcm = open_capture(mac, rate, channels, in_bits);
+	snd_pcm_format_t capture_format;
+	snd_pcm_t *pcm = open_capture(mac, rate, channels, in_bits, &capture_format);
 	if (!pcm) {
 		return SESSION_NO_PCM;
 	}
@@ -282,11 +293,11 @@ static session_t capture_session(const char *mac, const char *name, bool may_gue
 	bool widen = false;
 	bool opened = false;
 	int buffer_ms = output_ms();
-	if (in_bits == 16) {
+	if (in_bits != 32) {
 		opened = audio_external_begin_latency((int)rate, (int)channels, 32, buffer_ms);
 		widen = opened;
 	}
-	if (!opened) {
+	if (!opened && (in_bits == 32 || in_bits == 16 || capture_format == SND_PCM_FORMAT_S24_3LE)) {
 		opened = audio_external_begin_latency((int)rate, (int)channels, (int)in_bits, buffer_ms);
 	}
 	if (!opened) {
@@ -296,7 +307,8 @@ static session_t capture_session(const char *mac, const char *name, bool may_gue
 		return SESSION_OVER;
 	}
 
-	size_t in_frame = (size_t)channels * (in_bits / 8);
+	size_t width = (size_t)snd_pcm_format_physical_width(capture_format) / 8;
+	size_t in_frame = (size_t)channels * width;
 	void *chunk = malloc(CHUNK_FRAMES * in_frame);
 	int32_t *wide = widen ? malloc(CHUNK_FRAMES * (size_t)channels * sizeof(int32_t)) : NULL;
 	if (!chunk || (widen && !wide)) {
@@ -398,9 +410,16 @@ static session_t capture_session(const char *mac, const char *name, bool may_gue
 		pthread_mutex_unlock(&lock);
 
 		if (widen) {
-			const int16_t *src = chunk;
+			const uint8_t *src = chunk;
 			for (snd_pcm_sframes_t i = 0; i < got * (snd_pcm_sframes_t)channels; i++) {
-				wide[i] = (int32_t)((uint32_t)(uint16_t)src[i] << 16);
+				if (in_bits == 16) {
+					wide[i] = (int32_t)((const int16_t *)chunk)[i] * 65536;
+				} else if (in_bits == 8) {
+					wide[i] = ((int32_t)*src - 128) * 16777216;
+				} else {
+					wide[i] = (int32_t)((uint32_t)src[0] << 8 | (uint32_t)src[1] << 16 | (uint32_t)src[2] << 24);
+				}
+				src += width;
 			}
 			audio_external_write(wide, (int)got);
 		} else {

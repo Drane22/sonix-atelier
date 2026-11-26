@@ -173,6 +173,11 @@ void audio_get_stream_codec(char *out, size_t size);
 // the DAC untouched over DoP; see dsd.h.
 int audio_get_dsd_multiple(void);
 
+// Lock-free smoothed output peak envelope (0..1000) while music or radio plays;
+// 0 when paused, stopped or idle. Used for subtle beat-reactive UI visuals.
+void audio_enable_music_envelope(bool enabled);
+int audio_get_music_envelope(void);
+
 void audio_seek(double seconds);
 
 // Playback speed. 1.0 is normal; anything else goes through a time stretcher,

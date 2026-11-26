@@ -397,7 +397,7 @@ void audio_park_output_before_suspend(void) {
 
 // True while the playback thread holds an open PCM handle. The suspend path
 // waits on this: no ALSA object may be alive when the SoC stops.
-static volatile bool pcm_device_open = false;
+static _Atomic int pcm_device_open = false;
 
 // How long a paused stream may keep the device -- and with it the CS43198 and
 // the amplifier -- powered before it is handed back. The usual way to leave the
@@ -1016,17 +1016,18 @@ static void pcm_drain_bounded(snd_pcm_t *pcm) {
 }
 
 // Closes the held PCM, letting it play out what it still has queued. Playback
-// thread only: nothing else touches held_pcm.
+// and external sources take ownership under the same lock.
 static void gapless_release(void) {
 	pthread_mutex_lock(&held_lock);
 	snd_pcm_t *pcm = held_pcm;
+	long since = held_since_ms;
 	held_pcm = NULL;
 	pthread_mutex_unlock(&held_lock);
 
 	if (!pcm) {
 		return;
 	}
-	fprintf(stderr, "audio[%ld]: gapless: closing the held PCM after %ld ms\n", log_ms(), log_ms() - held_since_ms);
+	fprintf(stderr, "audio[%ld]: gapless: closing the held PCM after %ld ms\n", log_ms(), log_ms() - since);
 	if (snd_pcm_state(pcm) == SND_PCM_STATE_PREPARED) {
 		snd_pcm_start(pcm);
 	}
@@ -1048,14 +1049,13 @@ static bool gapless_holding(void) {
 
 // The track ended on its own and the format can be reused, so keep the PCM.
 static void gapless_hold(snd_pcm_t *pcm, int channels, int rate, int bits, snd_pcm_uframes_t period) {
+	int route = alsa_output_key();
 	pthread_mutex_lock(&held_lock);
-	held_pcm = pcm;
-	pthread_mutex_unlock(&held_lock);
 	held_channels = channels;
 	held_rate = rate;
 	held_bits = bits;
 	held_period = period;
-	held_route = alsa_output_key();
+	held_route = route;
 	held_since_ms = log_ms();
 	// The device this handle is really on. Taken from the handle and not from
 	// the route, for the reason given at keep_open: the route can already have
@@ -1063,6 +1063,8 @@ static void gapless_hold(snd_pcm_t *pcm, int channels, int rate, int bits, snd_p
 	// did not ask for.
 	const char *opened_as = pcm_device_name(pcm);
 	snprintf(held_device, sizeof(held_device), "%s", opened_as ? opened_as : AUDIO_DEFAULT_PCM);
+	held_pcm = pcm;
+	pthread_mutex_unlock(&held_lock);
 	fprintf(stderr, "audio[%ld]: gapless: holding the PCM (%d ch, %d Hz, %d bit)\n", log_ms(), channels, rate, bits);
 }
 
@@ -1151,11 +1153,11 @@ static snd_pcm_t *gapless_take(int channels, int rate, int bits, snd_pcm_uframes
 // are read in open_pcm_device() without external_lock: that pointer is what the
 // retry loop is about to find busy anyway, so a stale read costs at worst one
 // request that was not needed, or one that arrives a moment late.
-static snd_pcm_t *external_pcm;
-static bool (*external_release_cb)(void);
+static snd_pcm_t * _Atomic external_pcm;
+static _Atomic(bool (*)(void)) external_release_cb;
 // Set when anything else asks for the output while an external source holds
 // it, for a source with no callback to be told through (audio_external_wanted).
-static volatile bool external_wanted;
+static _Atomic int external_wanted;
 // The holder gives way to anyone who asks (audio_external_begin_yielding).
 static bool external_yielding;
 
@@ -1178,8 +1180,9 @@ static void release_external_output(void) {
 	if (external_pcm) {
 		external_wanted = true;
 	}
-	if (external_pcm && external_release_cb) {
-		external_release_cb();
+	bool (*cb)(void) = external_release_cb;
+	if (external_pcm && cb) {
+		cb();
 	}
 }
 
@@ -2299,6 +2302,46 @@ static void playback_wrote(snd_pcm_t *pcm, snd_pcm_uframes_t frames) {
 	playback_follow(pcm);
 }
 
+static _Atomic int music_env_enabled;
+static unsigned music_env_permille;
+
+void audio_enable_music_envelope(bool enabled) {
+	__atomic_store_n(&music_env_enabled, enabled, __ATOMIC_RELAXED);
+}
+
+static unsigned long music_env_at_ms;
+
+static void sample_music_envelope(const void *buf, size_t frames, int channels, int bits, bool dop) {
+	if (!__atomic_load_n(&music_env_enabled, __ATOMIC_RELAXED) || !buf || !frames || channels <= 0 || (bits != 16 && bits != 24 && bits != 32)) {
+		return;
+	}
+
+	unsigned peak = 9500; // DoP carries marker bytes, so use a steady pulse.
+	if (!dop) {
+		peak = 0;
+		const size_t width = (size_t)bits / 8;
+		const size_t step = frames > 128 ? frames / 64 : 1;
+		const uint8_t *pcm = buf;
+		for (size_t f = 0; f < frames; f += step) {
+			// The high two bytes of the first channel, including packed S24_3LE.
+			const uint8_t *hi = pcm + f * (size_t)channels * width + width - 2;
+			int value = (int16_t)((unsigned)hi[0] | (unsigned)hi[1] << 8);
+			unsigned magnitude = (unsigned)abs(value);
+			if (magnitude > peak) peak = magnitude;
+		}
+	}
+	unsigned current = peak * 1000u >> 15;
+	unsigned prev = __atomic_load_n(&music_env_permille, __ATOMIC_RELAXED);
+	unsigned next = current > prev ? (prev + current * 3u) / 4 : (prev * 5u + current * 3u) / 8;
+	__atomic_store_n(&music_env_permille, next, __ATOMIC_RELAXED);
+	__atomic_store_n(&music_env_at_ms, (unsigned long)log_ms(), __ATOMIC_RELEASE);
+}
+
+int audio_get_music_envelope(void) {
+	unsigned long age = (unsigned long)log_ms() - __atomic_load_n(&music_env_at_ms, __ATOMIC_ACQUIRE);
+	return age <= 350 ? (int)__atomic_load_n(&music_env_permille, __ATOMIC_RELAXED) : 0;
+}
+
 // Wakes the playback thread out of its wait for room in the card's buffer,
 // so that a pause, a seek or a stop is acted on at once. Without it the wait
 // ends only when a period frees, up to a period of music after the tap (some
@@ -2400,6 +2443,7 @@ static snd_pcm_sframes_t pcm_write_recover(snd_pcm_t **pcm, const void *buf, snd
 			written = snd_pcm_writei(*pcm, buf, frames);
 		}
 		if (written >= 0) {
+			sample_music_envelope(buf, (size_t)written, channels, bits, stream_dsd_multiple > 0);
 			playback_wrote(*pcm, (snd_pcm_uframes_t)written);
 			return written;
 		}
@@ -3121,8 +3165,8 @@ static void play_wav_file(const char *filepath) {
 			snd_pcm_drop(pcm_handle);
 			}
 		snd_pcm_close(pcm_handle);
+		pcm_device_open = false;
 	}
-	pcm_device_open = keep_open;
 	free(buffer);
 	free(raw);
 	fclose(f);
@@ -3905,6 +3949,7 @@ static void play_decoded_file(const char *filepath, decode_format_t format) {
 			snd_pcm_drop(pcm_handle);
 			}
 		snd_pcm_close(pcm_handle);
+		pcm_device_open = false;
 
 		// A stream that sat paused (a track left paused while the screen was
 		// off, then skipped) leaves the codec idle, and the driver wants a
@@ -3926,7 +3971,6 @@ static void play_decoded_file(const char *filepath, decode_format_t format) {
 			usleep(BT_REOPEN_SETTLE_MS * 1000);
 		}
 	}
-	pcm_device_open = keep_open;
 	pthread_mutex_lock(&audio_mutex);
 	stream_dsd_multiple = 0;
 	pthread_mutex_unlock(&audio_mutex);
@@ -4640,19 +4684,19 @@ bool audio_external_begin(int sample_rate, int channels, int bits) {
 // Under external_lock, which it lets go of while it waits. Gives the holder up
 // to `ms` to close the PCM after being asked, and says whether it did.
 static bool external_wait_closed(int ms) {
-	for (int waited = 0; external_pcm && waited < ms; waited += 10) {
+	for (int waited = 0; (external_pcm || external_yielding) && waited < ms; waited += 10) {
 		pthread_mutex_unlock(&external_lock);
 		usleep(10 * 1000);
 		pthread_mutex_lock(&external_lock);
 	}
-	return !external_pcm;
+	return !external_pcm && !external_yielding;
 }
 
 // How long a holder that gives way is waited for: it notices between two
 // writes, a few tens of milliseconds.
 #define EXTERNAL_YIELD_WAIT_MS 1000
 
-bool audio_external_begin_latency(int sample_rate, int channels, int bits, int buffer_ms) {
+static bool external_begin(int sample_rate, int channels, int bits, int buffer_ms, bool yielding) {
 	// A PCM held by gapless occupies the DAC. Callers here want to open one of
 	// their own on the same device, and without this they find it busy right
 	// after a track has ended on its own.
@@ -4662,14 +4706,19 @@ bool audio_external_begin_latency(int sample_rate, int channels, int bits, int b
 
 	// The metronome holds the output only until someone else wants it: asked,
 	// it closes, and this opens the PCM afresh on this source's own terms.
-	if (external_pcm && external_yielding) {
+	if (external_yielding && !yielding) {
 		external_wanted = true;
-		external_wait_closed(EXTERNAL_YIELD_WAIT_MS);
+		if (!external_wait_closed(EXTERNAL_YIELD_WAIT_MS)) {
+			pthread_mutex_unlock(&external_lock);
+			return false;
+		}
 	}
 
-	if (external_pcm) {
+	if (external_pcm || external_yielding) {
+		bool compatible = !yielding && !external_yielding && external_rate == sample_rate &&
+			external_channels == channels && external_bits == bits && external_buffer_ms == buffer_ms;
 		pthread_mutex_unlock(&external_lock);
-		return true; // already open, and on the same terms
+		return compatible;
 	}
 
 	// One frame is one sample per channel. 24-bit is the odd one out -- ALSA's
@@ -4691,12 +4740,17 @@ bool audio_external_begin_latency(int sample_rate, int channels, int bits, int b
 	external_underrun_logged_ms = 0;
 
 	bool ok = external_open_locked();
+	external_yielding = ok && yielding;
 
 	printf("audio: external source %s (%d Hz, %d ch, %d bits)\n", ok ? "playing" : "COULD NOT OPEN", sample_rate,
 		   channels, bits);
 
 	pthread_mutex_unlock(&external_lock);
 	return ok;
+}
+
+bool audio_external_begin_latency(int sample_rate, int channels, int bits, int buffer_ms) {
+	return external_begin(sample_rate, channels, bits, buffer_ms, false);
 }
 
 bool audio_external_begin_yielding(int sample_rate, int channels, int bits, int buffer_ms) {
@@ -4733,13 +4787,7 @@ bool audio_external_begin_yielding(int sample_rate, int channels, int bits, int 
 		paused_release_wanted = false;
 	}
 
-	if (!audio_external_begin_latency(sample_rate, channels, bits, buffer_ms)) {
-		return false;
-	}
-	pthread_mutex_lock(&external_lock);
-	external_yielding = external_pcm != NULL;
-	pthread_mutex_unlock(&external_lock);
-	return true;
+	return external_begin(sample_rate, channels, bits, buffer_ms, true);
 }
 
 // Under external_lock. Re-opens when the headphones have moved, and says
@@ -4830,14 +4878,20 @@ int audio_external_write(const void *frames, int count) {
 
 	int written = 0;
 	long last_progress_ms = log_ms();
+	int recoveries = 0;
 	while (written < count) {
-		const void *chunk = (const char *)frames + (size_t)written * external_frame_bytes;
+		const void *source = (const char *)frames + (size_t)written * external_frame_bytes;
+		const void *chunk = source;
 		if (pcm_takes_s24(external_pcm, external_bits)) {
 			chunk = s24_from_s32(&external_s24, chunk, (size_t)(count - written) * (size_t)external_channels);
 		}
 		snd_pcm_sframes_t got = chunk ? snd_pcm_writei(external_pcm, chunk, (snd_pcm_uframes_t)(count - written)) : -ENOMEM;
 		if (got > 0) {
+			if (!external_yielding) {
+				sample_music_envelope(source, (size_t)got, external_channels, external_bits, false);
+			}
 			written += (int)got;
+			recoveries = 0;
 			last_progress_ms = log_ms();
 			continue;
 		}
@@ -4845,6 +4899,7 @@ int audio_external_write(const void *frames, int count) {
 			// No room. A bluealsa PCM is opened non-blocking (open_pcm_device),
 			// so the wait that paces the source to real time happens here; the
 			// rest of the chunk is not dropped.
+			if (external_wanted || (log_ms() - last_progress_ms >= BT_WRITE_STALL_MS && ++recoveries > 1)) break;
 			if (!external_wait_room(&last_progress_ms)) {
 				break;
 			}
@@ -4859,14 +4914,15 @@ int audio_external_write(const void *frames, int count) {
 				external_underrun_logged_ms = log_ms();
 				fprintf(stderr, "audio: the external source ran dry (%u underruns since it opened)\n", external_underruns);
 			}
-			snd_pcm_prepare(external_pcm);
+			if (++recoveries > 3 || snd_pcm_prepare(external_pcm) < 0) break;
 			continue;
 		}
 		if (got == -ESTRPIPE) {
-			while (snd_pcm_resume(external_pcm) == -EAGAIN) {
-				usleep(100 * 1000);
-			}
-			snd_pcm_prepare(external_pcm);
+			if (++recoveries > 3) break;
+			int err;
+			for (int attempt = 0; (err = snd_pcm_resume(external_pcm)) == -EAGAIN && attempt < 10; attempt++)
+				usleep(10000);
+			if (err < 0 && snd_pcm_prepare(external_pcm) < 0) break;
 			continue;
 		}
 		fprintf(stderr, "audio: external write failed: %s\n", snd_strerror((int)got));
@@ -4885,11 +4941,11 @@ void audio_external_end(void) {
 		snd_pcm_close(external_pcm);
 		external_pcm = NULL;
 		pcm_device_open = false;
-		external_yielding = false;
 		external_route = -1;
 		external_device[0] = '\0';
 		printf("audio: external source finished; device handed back (%u underruns)\n", external_underruns);
 	}
 
+	external_yielding = false;
 	pthread_mutex_unlock(&external_lock);
 }

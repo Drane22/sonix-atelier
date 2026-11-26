@@ -1,6 +1,9 @@
 #include "firmware.h"
 
 #include <dirent.h>
+#include <errno.h>
+#include <pthread.h>
+#include <sys/wait.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -37,16 +40,20 @@ static bool find_in_dir(const char *root, const char *stem, char *out, size_t ou
 
 	bool found = false;
 	struct dirent *de;
-	while (!found && (de = readdir(dir)) != NULL) {
+	while ((de = readdir(dir)) != NULL) {
 		if (strcasecmp(de->d_name, wanted) != 0) {
 			continue;
 		}
-		snprintf(out, out_size, "%s/%s", root, de->d_name);
+		// Recovery must see the same file we hashed on case-sensitive cards.
+		if (found) {
+			found = false;
+			break;
+		}
+		if (snprintf(out, out_size, "%s/%s", root, de->d_name) >= (int)out_size) break;
 
 		struct stat st;
-		if (stat(out, &st) == 0 && S_ISREG(st.st_mode)) {
-			found = true;
-		}
+		if (lstat(out, &st) != 0 || !S_ISREG(st.st_mode) || st.st_size < 17 * 2048) break;
+		found = true;
 	}
 
 	closedir(dir);
@@ -101,9 +108,78 @@ bool firmware_update_file_find(char *out, size_t out_size) {
 	return find_in_dir(root, name, out, out_size);
 }
 
-void firmware_update_start(void) {
+// Only the GUI starts an update. The worker hashes on a separate thread so
+// card I/O never stalls input or the audio completion timer.
+static char verify_path[512];
+static const char *verify_model;
+static struct stat verified_file;
+static _Atomic int verify_state;
+
+static bool same_file(void) {
+	struct stat st;
+	return lstat(verify_path, &st) == 0 && S_ISREG(st.st_mode) &&
+		st.st_dev == verified_file.st_dev && st.st_ino == verified_file.st_ino &&
+		st.st_size == verified_file.st_size && st.st_mtime == verified_file.st_mtime &&
+		st.st_ctime == verified_file.st_ctime
+#ifdef __APPLE__
+		&& st.st_mtimespec.tv_nsec == verified_file.st_mtimespec.tv_nsec
+		&& st.st_ctimespec.tv_nsec == verified_file.st_ctimespec.tv_nsec;
+#else
+		&& st.st_mtim.tv_nsec == verified_file.st_mtim.tv_nsec && st.st_ctim.tv_nsec == verified_file.st_ctim.tv_nsec;
+#endif
+}
+
+static void *verify_worker(void *unused) {
+	(void)unused;
+#ifdef HOST_BUILD
+	const char *script = "../sonix-packer/verify-upt.sh";
+	const char *mode = "--host";
+#else
+	const char *script = "/usr/bin/sonix_verify_upt.sh";
+	const char *mode = "device";
+#endif
+	pid_t pid = fork();
+	if (pid == 0) {
+		execl("/bin/sh", "sh", script, verify_model, verify_path, mode, (char *)NULL);
+		_exit(127);
+	}
+	int status = 0;
+	pid_t done = -1;
+	if (pid > 0) {
+		do { done = waitpid(pid, &status, 0); } while (done < 0 && errno == EINTR);
+	}
+	verify_state = done == pid && pid > 0 && WIFEXITED(status) && WEXITSTATUS(status) == 0 && same_file()
+		? FIRMWARE_VERIFIED : FIRMWARE_INVALID;
+	return NULL;
+}
+
+bool firmware_verify_start(const char *path) {
+	const sysinfo_model_t *model = sysinfo_model();
+	if (verify_state == FIRMWARE_VERIFYING || !model || !path || strlen(path) >= sizeof(verify_path)) return false;
+	verify_state = FIRMWARE_INVALID;
+	if (lstat(path, &verified_file) != 0 || !S_ISREG(verified_file.st_mode)) return false;
+	snprintf(verify_path, sizeof(verify_path), "%s", path);
+	verify_model = model->update_stem;
+	verify_state = FIRMWARE_VERIFYING;
+	pthread_t thread;
+	if (pthread_create(&thread, NULL, verify_worker, NULL) != 0) {
+		verify_state = FIRMWARE_INVALID;
+		return false;
+	}
+	pthread_detach(thread);
+	return true;
+}
+
+firmware_verify_state_t firmware_verify_state(void) { return verify_state; }
+
+bool firmware_update_start(void) {
+	char path[sizeof(verify_path)];
+	if (verify_state != FIRMWARE_VERIFIED || !firmware_update_file_find(path, sizeof(path)) ||
+		strcmp(path, verify_path) != 0 || !same_file()) return false;
+	verify_state = FIRMWARE_INVALID;
 #ifdef HOST_BUILD
 	printf("firmware: (host build) would arm recovery and reboot\n");
+	return true;
 #else
 	printf("firmware: arming recovery\n");
 

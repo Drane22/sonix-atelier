@@ -668,7 +668,8 @@ bool storage_sd_writable(void) { return sd_writable; }
 static int mount_sd(storage_config_t *storage_cfg, const system_runtime_t *runtime) {
 	(void)runtime;
 
-	const char *mount_point = pick_sd_root(storage_cfg);
+	const char *mount_point = !storage_cfg->manage_mount && storage_cfg->mount_point
+		? storage_cfg->mount_point : pick_sd_root(storage_cfg);
 	snprintf(sd_root, sizeof(sd_root), "%s", mount_point);
 
 	if (!storage_cfg->manage_mount || getenv("SONIX_NO_MOUNT")) {
@@ -2573,18 +2574,20 @@ void system_start_services(system_config_t *cfg, system_notification_cb_t notifi
 
 	check_and_mount_existing_sd(cfg->storage_cfg, &runtime); // mount sd on startup, if it's present
 
-	pthread_t supervisor;
-	if (pthread_create(&supervisor, NULL, card_supervisor_thread, NULL) == 0) {
-		pthread_detach(supervisor);
-		printf("storage: card supervisor watching %s\n", sd_root);
-	}
+	if (cfg->storage_cfg->manage_mount) {
+		pthread_t supervisor;
+		if (pthread_create(&supervisor, NULL, card_supervisor_thread, NULL) == 0) {
+			pthread_detach(supervisor);
+			printf("storage: card supervisor watching %s\n", sd_root);
+		}
 
-	pthread_t sd_thread;
-	if (pthread_create(&sd_thread, NULL, sd_hotplug_thread, &runtime) != 0) {
-		fprintf(stderr, "Failed to start SD hotplug thread :(\n");
-	} else {
-		printf("Started SD hotplug thread :)\n");
-		pthread_detach(sd_thread);
+		pthread_t sd_thread;
+		if (pthread_create(&sd_thread, NULL, sd_hotplug_thread, &runtime) != 0) {
+			fprintf(stderr, "Failed to start SD hotplug thread :(\n");
+		} else {
+			printf("Started SD hotplug thread :)\n");
+			pthread_detach(sd_thread);
+		}
 	}
 
 	log_input_devices();

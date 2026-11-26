@@ -48,7 +48,7 @@
 // which is the other reason for the __mips__ guard.
 // ---------------------------------------------------------------------------
 
-#if defined(__mips__) && !defined(HOST_BUILD)
+#if defined(__mips__) && !defined(HOST_BUILD) && !defined(__ASSEMBLER__)
 
 // Reimplemented in glibc 2.27.
 __asm__(".symver powf,powf@GLIBC_2.0");

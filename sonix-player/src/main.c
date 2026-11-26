@@ -20,6 +20,7 @@
 #include "src/system/audio/waveform.h"
 #include "src/gui/fonts/fonts.h"
 #include "src/gui/shell/gui.h"
+#include "src/gui/shell/startup_anim.h"
 #include "src/gui/nowplaying/player.h"
 #include "src/gui/settings/powersettings.h"
 #include "src/gui/settings/settings.h"
@@ -74,6 +75,13 @@
 static volatile sig_atomic_t running = 1;
 
 #ifdef HOST_BUILD
+#include "src/gui/shell/switcher.h"
+#include "src/gui/shell/theme.h"
+#include "src/system/image/png_write.h"
+#include "src/system/playback/device_state.h"
+
+static lv_display_t *host_display;
+
 // Screenshot trigger on the simulator. The device uses volume-up plus power,
 // physical keys that do not exist here, so creating /tmp/sonix/shot takes their
 // place and runs the same screenshot path (copy, flash, PNG writer).
@@ -83,6 +91,258 @@ static void host_shot_poll_cb(lv_timer_t *timer) {
 		remove("/tmp/sonix/shot");
 		screenshot_request();
 	}
+}
+
+// Optional deterministic simulator automation driver (active ONLY when
+// SONIX_AUTOTEST=<script_path> is set in the environment). Drives real LVGL
+// pointer touch/drag gestures, hardware key events, real audio/queue playback,
+// synchronous flash-free PNG frame capture, and memory/render-time telemetry.
+static FILE *autotest_fp;
+static uint32_t autotest_wait_until;
+static lv_point_t autotest_pt;
+static lv_indev_state_t autotest_btn_state = LV_INDEV_STATE_RELEASED;
+static int autotest_release_ticks;
+static int autotest_key_up_code = -1;
+static int autotest_key_up_ticks;
+static int autotest_drag_steps_left;
+static float autotest_drag_x, autotest_drag_y, autotest_drag_dx, autotest_drag_dy;
+static bool autotest_drag_auto_release;
+
+static void autotest_indev_read_cb(lv_indev_t *indev, lv_indev_data_t *data) {
+	(void)indev;
+	data->point = autotest_pt;
+	data->state = autotest_btn_state;
+}
+
+static long read_status_kb(const char *field) {
+	FILE *f = fopen("/proc/self/status", "r");
+	if (!f) return -1;
+	char line[256];
+	long val = -1;
+	size_t flen = strlen(field);
+	while (fgets(line, sizeof(line), f)) {
+		if (strncmp(line, field, flen) == 0 && line[flen] == ':') {
+			val = strtol(line + flen + 1, NULL, 10);
+			break;
+		}
+	}
+	fclose(f);
+	return val;
+}
+
+static void autotest_measure_perf(const char *label) {
+	if (!host_display) return;
+	const int N = 30;
+	double times_ms[30];
+	double sum = 0.0, max_v = 0.0;
+	for (int i = 0; i < N; i++) {
+		lv_obj_invalidate(lv_screen_active());
+		lv_obj_invalidate(lv_layer_top());
+		struct timespec t0, t1;
+		clock_gettime(CLOCK_MONOTONIC, &t0);
+		lv_refr_now(host_display);
+		clock_gettime(CLOCK_MONOTONIC, &t1);
+		double dt = (double)(t1.tv_sec - t0.tv_sec) * 1000.0 + (double)(t1.tv_nsec - t0.tv_nsec) / 1e6;
+		times_ms[i] = dt;
+		sum += dt;
+		if (dt > max_v) max_v = dt;
+	}
+	// Simple sort for p95
+	for (int i = 0; i < N; i++) {
+		for (int j = i + 1; j < N; j++) {
+			if (times_ms[j] < times_ms[i]) {
+				double tmp = times_ms[i];
+				times_ms[i] = times_ms[j];
+				times_ms[j] = tmp;
+			}
+		}
+	}
+	long rss_kb = read_status_kb("VmRSS");
+	long hwm_kb = read_status_kb("VmHWM");
+	long data_kb = read_status_kb("VmData");
+	printf("[PERF] %s | VmRSS=%ld KiB VmHWM=%ld KiB VmData=%ld KiB | frame_avg=%.3f ms frame_p95=%.3f ms frame_max=%.3f ms\n",
+		   label, rss_kb, hwm_kb, data_kb, sum / N, times_ms[(N * 95) / 100], max_v);
+	fflush(stdout);
+}
+
+static void autotest_tick_cb(lv_timer_t *timer) {
+	(void)timer;
+	if (autotest_key_up_code >= 0) {
+		if (--autotest_key_up_ticks <= 0) {
+			input_host_button(autotest_key_up_code, false);
+			autotest_key_up_code = -1;
+		}
+		return;
+	}
+	if (autotest_release_ticks > 0) {
+		if (--autotest_release_ticks == 0) {
+			autotest_btn_state = LV_INDEV_STATE_RELEASED;
+		}
+		return;
+	}
+	if (autotest_drag_steps_left > 0) {
+		autotest_drag_x += autotest_drag_dx;
+		autotest_drag_y += autotest_drag_dy;
+		autotest_pt.x = (int32_t)(autotest_drag_x + 0.5f);
+		autotest_pt.y = (int32_t)(autotest_drag_y + 0.5f);
+		autotest_btn_state = LV_INDEV_STATE_PRESSED;
+		if (--autotest_drag_steps_left == 0 && autotest_drag_auto_release) {
+			autotest_release_ticks = 2;
+		}
+		return;
+	}
+	if (!autotest_fp || lv_tick_get() < autotest_wait_until) {
+		return;
+	}
+
+	char raw[2048];
+	while (fgets(raw, sizeof(raw), autotest_fp)) {
+		size_t len = strlen(raw);
+		while (len > 0 && (raw[len - 1] == '\n' || raw[len - 1] == '\r' || raw[len - 1] == ' ')) {
+			raw[--len] = '\0';
+		}
+		char *line = raw;
+		while (*line == ' ' || *line == '\t') line++;
+		if (!*line || *line == '#') continue;
+
+		printf("[AUTOTEST] %s\n", line);
+		fflush(stdout);
+
+		int x1, y1, x2, y2, steps, idx;
+		double secs;
+		if (sscanf(line, "wait %d", &x1) == 1) {
+			autotest_wait_until = lv_tick_get() + (uint32_t)(x1 > 0 ? x1 : 0);
+			return;
+		}
+		if (strncmp(line, "play_queue ", 11) == 0) {
+			char *rest = line + 11;
+			idx = (int)strtol(rest, &rest, 10);
+			while (*rest == ' ') rest++;
+			const char *paths[32];
+			int count = 0;
+			char *tok = strtok(rest, "|");
+			while (tok && count < 32) {
+				paths[count++] = tok;
+				tok = strtok(NULL, "|");
+			}
+			if (count > 0) {
+				if (idx < 0 || idx >= count) idx = 0;
+				device_state_play_list(paths, count, idx);
+				player_refresh_now_playing();
+				player_sheet_open(false);
+			}
+			autotest_wait_until = lv_tick_get() + 60;
+			return;
+		}
+		if (sscanf(line, "seek %lf", &secs) == 1) {
+			device_state_seek(secs);
+			autotest_wait_until = lv_tick_get() + 80;
+			return;
+		}
+		if (sscanf(line, "tap %d %d", &x1, &y1) == 2) {
+			autotest_pt.x = x1;
+			autotest_pt.y = y1;
+			autotest_btn_state = LV_INDEV_STATE_PRESSED;
+			autotest_release_ticks = 3;
+			autotest_wait_until = lv_tick_get() + 120;
+			return;
+		}
+		if (sscanf(line, "drag_hold %d %d %d %d %d", &x1, &y1, &x2, &y2, &steps) == 5) {
+			if (steps < 2) steps = 2;
+			autotest_drag_x = (float)x1;
+			autotest_drag_y = (float)y1;
+			autotest_drag_dx = (float)(x2 - x1) / (float)steps;
+			autotest_drag_dy = (float)(y2 - y1) / (float)steps;
+			autotest_pt.x = x1;
+			autotest_pt.y = y1;
+			autotest_btn_state = LV_INDEV_STATE_PRESSED;
+			autotest_drag_steps_left = steps;
+			autotest_drag_auto_release = false;
+			return;
+		}
+		if (sscanf(line, "drag_swipe %d %d %d %d %d", &x1, &y1, &x2, &y2, &steps) == 5) {
+			if (steps < 2) steps = 2;
+			autotest_drag_x = (float)x1;
+			autotest_drag_y = (float)y1;
+			autotest_drag_dx = (float)(x2 - x1) / (float)steps;
+			autotest_drag_dy = (float)(y2 - y1) / (float)steps;
+			autotest_pt.x = x1;
+			autotest_pt.y = y1;
+			autotest_btn_state = LV_INDEV_STATE_PRESSED;
+			autotest_drag_steps_left = steps;
+			autotest_drag_auto_release = true;
+			return;
+		}
+		if (strcmp(line, "drag_release") == 0) {
+			autotest_btn_state = LV_INDEV_STATE_RELEASED;
+			autotest_wait_until = lv_tick_get() + 80;
+			return;
+		}
+		if (strncmp(line, "key ", 4) == 0) {
+			char k = line[4];
+			int code = -1;
+			if (k == 'u') code = KEY_VOLUMEUP;
+			else if (k == 'i') code = KEY_VOLUMEDOWN;
+			else if (k == 'b') code = KEY_NEXTSONG;
+			else if (k == 'n') code = KEY_PLAYPAUSE;
+			else if (k == 'm') code = KEY_PREVIOUSSONG;
+			else if (k == 'p') code = KEY_POWER;
+			if (code >= 0) {
+				input_host_button(code, true);
+				autotest_key_up_code = code;
+				autotest_key_up_ticks = 2;
+			}
+			return;
+		}
+		if (strncmp(line, "accent ", 7) == 0) {
+			char mode[32] = "";
+			int preset = 0;
+			if (sscanf(line + 7, "%31s %d", mode, &preset) >= 1) {
+				theme_set_accent(preset);
+				player_cover_accent_set(strcmp(mode, "adaptive") == 0);
+			}
+			autotest_wait_until = lv_tick_get() + 80;
+			return;
+		}
+		if (strcmp(line, "sheet_open") == 0) {
+			player_sheet_open(false);
+			autotest_wait_until = lv_tick_get() + 80;
+			return;
+		}
+		if (strcmp(line, "sheet_close") == 0) {
+			player_sheet_close(false);
+			autotest_wait_until = lv_tick_get() + 80;
+			return;
+		}
+		if (strncmp(line, "shot ", 5) == 0) {
+			const char *out_path = line + 5;
+			while (*out_path == ' ') out_path++;
+			if (host_display) {
+				lv_refr_now(host_display);
+			}
+			int w = 0, h = 0;
+			const uint16_t *px = display_capture_frame(&w, &h);
+			if (px && w > 0 && h > 0 && png_write_rgb565(out_path, px, w, h)) {
+				printf("[SHOT] %s (%dx%d)\n", out_path, w, h);
+			} else {
+				printf("[SHOT-ERR] failed to capture %s\n", out_path);
+			}
+			fflush(stdout);
+			continue;
+		}
+		if (strncmp(line, "perf ", 5) == 0) {
+			autotest_measure_perf(line + 5);
+			continue;
+		}
+		if (strcmp(line, "quit") == 0) {
+			fclose(autotest_fp);
+			autotest_fp = NULL;
+			running = 0;
+			return;
+		}
+	}
+	fclose(autotest_fp);
+	autotest_fp = NULL;
 }
 #endif
 
@@ -1095,8 +1355,6 @@ static void post_gui_popup(const char *message, void *user_data) {
 }
 
 #ifdef HOST_BUILD
-static lv_display_t *host_display;
-
 // The keyboard stands in for the buttons on the case.
 //
 // On the R3 Pro II the two skip keys arrive from the kernel swapped --
@@ -1133,14 +1391,85 @@ static lv_display_t *init_host_display(void) {
 	int width = 0, height = 0;
 	panel_size(&width, &height, 0, 0); // the window is made from it: nothing to ask
 
+	// When launched from an SSH / IDE terminal inside a VM whose desktop session
+	// is already running on seat0, attach to that local Wayland/X11 socket automatically.
+	if (!getenv("DISPLAY") && !getenv("WAYLAND_DISPLAY")) {
+		char rt_dir[64], wl_sock[96], bus_sock[96], bus_addr[128];
+		snprintf(rt_dir, sizeof(rt_dir), "/run/user/%u", (unsigned)getuid());
+		snprintf(wl_sock, sizeof(wl_sock), "%s/wayland-0", rt_dir);
+		snprintf(bus_sock, sizeof(bus_sock), "%s/bus", rt_dir);
+		setenv("XDG_RUNTIME_DIR", rt_dir, 0);
+		if (access(bus_sock, F_OK) == 0 && !getenv("DBUS_SESSION_BUS_ADDRESS")) {
+			snprintf(bus_addr, sizeof(bus_addr), "unix:path=%s", bus_sock);
+			setenv("DBUS_SESSION_BUS_ADDRESS", bus_addr, 1);
+		}
+		if (access("/tmp/.X11-unix/X0", F_OK) == 0) {
+			setenv("DISPLAY", ":0", 1);
+			if (!getenv("XAUTHORITY")) {
+				DIR *d = opendir(rt_dir);
+				if (d) {
+					struct dirent *de;
+					while ((de = readdir(d)) != NULL) {
+						if (strncmp(de->d_name, ".mutter-Xwaylandauth.", 21) == 0) {
+							char xauth[320];
+							snprintf(xauth, sizeof(xauth), "%s/%s", rt_dir, de->d_name);
+							setenv("XAUTHORITY", xauth, 1);
+							break;
+						}
+					}
+					closedir(d);
+				}
+			}
+		} else if (access(wl_sock, F_OK) == 0) {
+			setenv("WAYLAND_DISPLAY", "wayland-0", 1);
+		}
+	}
+	SDL_SetHintWithPriority(SDL_HINT_VIDEODRIVER, "x11,wayland", SDL_HINT_DEFAULT);
+	SDL_SetHintWithPriority(SDL_HINT_RENDER_DRIVER, "software", SDL_HINT_DEFAULT);
+	SDL_SetHint(SDL_HINT_RENDER_SCALE_QUALITY, "1");
+
 	lv_display_t *disp = lv_sdl_window_create(width, height);
 	if (!disp) {
 		fprintf(stderr, "Error: Failed to create SDL2 window\n");
 		return NULL;
 	}
+	lv_sdl_window_set_title(disp, "Sonix Player Simulator");
+
+	// Fit 480x800 cleanly onto shorter VM / laptop desktops (e.g. 1280x800 in VirtualBox)
+	// using exact multiples of 1/20 so 480, 720 and 800 stay integer pixel sizes.
+	float zoom = 1.0f;
+	const char *zoom_env = getenv("SONIX_ZOOM");
+	if (zoom_env && zoom_env[0]) {
+		float z = strtof(zoom_env, NULL);
+		if (z >= 0.5f && z <= 2.0f) zoom = z;
+	} else {
+		SDL_Rect usable = {0};
+		if (SDL_GetDisplayUsableBounds(0, &usable) == 0 && usable.h > 0 && height + 64 > usable.h) {
+			static const float STEPS[] = {0.90f, 0.85f, 0.80f, 0.75f, 0.70f};
+			zoom = 0.70f;
+			for (size_t i = 0; i < sizeof(STEPS) / sizeof(STEPS[0]); i++) {
+				if ((int)((float)height * STEPS[i]) + 64 <= usable.h) {
+					zoom = STEPS[i];
+					break;
+				}
+			}
+		}
+	}
+	if (zoom != 1.0f) {
+		lv_sdl_window_set_zoom(disp, zoom);
+		printf("sdl: scaled %dx%d panel by %.2fx -> %dx%d window to fit desktop\n", width, height, (double)zoom,
+			   (int)((float)width * zoom), (int)((float)height * zoom));
+	}
+
+	// Software SDL otherwise converts the entire RGB565 screen on every
+	// present, including frames where LVGL changed only a few pixels.
+	if (SDL_BYTESPERPIXEL(SDL_GetWindowPixelFormat(lv_sdl_window_get_window(disp))) == 4) {
+		lv_display_set_color_format(disp, LV_COLOR_FORMAT_XRGB8888);
+	}
 
 	// Non-resizeable, which also makes tiling window managers float it.
 	lv_sdl_window_set_resizeable(disp, false);
+	SDL_SetWindowPosition(lv_sdl_window_get_window(disp), SDL_WINDOWPOS_CENTERED, SDL_WINDOWPOS_CENTERED);
 
 	// Flushing the backbuffers once here avoids the initial viewport shift.
 	SDL_Renderer *renderer = (SDL_Renderer *)lv_sdl_window_get_renderer(disp);
@@ -1970,6 +2299,7 @@ int main(int argc, char **argv) {
 	//
 	// After lv_init(), never before: it would overwrite this.
 	lv_rand_set_seed((uint32_t)time(NULL) ^ (uint32_t)getpid());
+	srand((unsigned)time(NULL) ^ ((unsigned)getpid() << 16));
 
 	// The fonts, before anything can create a widget: every lv_font_t the
 	// interface points at is filled in here, from /usr/resource/sonix/fonts through
@@ -2014,13 +2344,12 @@ int main(int argc, char **argv) {
 	// taking over that job, which is what manage_mount does; the player still
 	// stays out of the way if it finds the card already mounted.
 	storage_config_t storage_cfg = {
-		// Both NULL: the player probes the block devices and the mount-point
-		// names the stock firmware uses and reports what it found in the log.
 		.device = NULL,
-		.mount_point = NULL,
 #ifdef HOST_BUILD
+		.mount_point = music_path,
 		.manage_mount = false, // never touch the developer's own filesystem
 #else
+		.mount_point = NULL, // Probe the stock mount-point names.
 		.manage_mount = true,
 #endif
 	};
@@ -2168,25 +2497,13 @@ int main(int argc, char **argv) {
 	// which bundle was found -- which is the first thing to look at when
 	// https stations fail.
 	tls_set_card_root(gui_cfg.sd_root_path);
-	// Where downloaded stream tracks go. The real card is used -- the same
-	// root the Qobuz page and the card watcher use -- and not
-	// gui_cfg.sd_root_path, which on the simulator is a different folder: the
-	// cache and the code that cleans it must agree on one root.
-	const char *card_root = storage_sd_root();
-	qobuzcache_set_root(card_root && card_root[0] ? card_root : gui_cfg.sd_root_path);
-	tidalcache_set_root(card_root && card_root[0] ? card_root : gui_cfg.sd_root_path);
-	podcastcache_set_root(card_root && card_root[0] ? card_root : gui_cfg.sd_root_path);
-	podcastsubs_set_root(card_root && card_root[0] ? card_root : gui_cfg.sd_root_path);
-	podcaststate_set_root(card_root && card_root[0] ? card_root : gui_cfg.sd_root_path);
-	// And where a track arriving over DLNA lands: same card, same reason.
-	dlna_set_root(card_root && card_root[0] ? card_root : gui_cfg.sd_root_path);
-	// And where the emulator looks for Games/GB and Games/GBC. Unlike the
-	// lines above this uses gui_cfg.sd_root_path and not storage_sd_root():
-	// those write a cache, which belongs on the real card, while games are
-	// the user's own files and live where the user's music lives. On the
-	// device the two are the same (see how gui_cfg is filled in); on the
-	// simulator they are not, which is what makes the page testable without
-	// the device.
+	// Stream caches, game ROMs and the library all follow the selected card.
+	qobuzcache_set_root(gui_cfg.sd_root_path);
+	tidalcache_set_root(gui_cfg.sd_root_path);
+	podcastcache_set_root(gui_cfg.sd_root_path);
+	podcastsubs_set_root(gui_cfg.sd_root_path);
+	podcaststate_set_root(gui_cfg.sd_root_path);
+	dlna_set_root(gui_cfg.sd_root_path);
 	gbdb_set_root(gui_cfg.sd_root_path);
 
 	// Rows pointing into the stream caches are dropped once at boot: a cache
@@ -2286,6 +2603,22 @@ int main(int argc, char **argv) {
 
 #ifdef HOST_BUILD
 	lv_timer_create(host_shot_poll_cb, 200, NULL); // see host_shot_poll_cb
+	{
+		const char *script = getenv("SONIX_AUTOTEST");
+		if (script && script[0]) {
+			autotest_fp = fopen(script, "r");
+			if (autotest_fp) {
+				lv_indev_t *sim_ptr = lv_indev_create();
+				lv_indev_set_type(sim_ptr, LV_INDEV_TYPE_POINTER);
+				lv_indev_set_display(sim_ptr, disp);
+				lv_indev_set_read_cb(sim_ptr, autotest_indev_read_cb);
+				tune_pointer(sim_ptr);
+				lv_timer_create(autotest_tick_cb, 20, NULL);
+			} else {
+				fprintf(stderr, "autotest: could not open %s\n", script);
+			}
+		}
+	}
 #endif
 
 	// The media player bluez shows to the headphones. After gui_init, because
@@ -2346,6 +2679,10 @@ int main(int argc, char **argv) {
 	// screen timeout is the Screen page's setting and comes from there.
 	powersettings_apply();
 	settings_apply_screen_off();
+
+	// Minimalist Sonix Atelier cold-boot reveal (skipped during first-boot wizard
+	// or when disabled in Settings > Appearance; never replayed on standby wake).
+	startup_anim_start(&gui_cfg, gui_first_boot_active());
 
 #ifndef HOST_BUILD
 	// Bluetooth off. A firmware whose /etc/init.d/S80_bt_init has not been

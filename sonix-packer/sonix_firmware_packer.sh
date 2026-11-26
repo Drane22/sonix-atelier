@@ -101,7 +101,6 @@ STOCK_UI_DIRS=(usr/resource/litegui usr/resource/layout usr/resource/str usr/res
 
 # The working folders always go, whether the run succeeded or not.
 cleanup() { rm -rf "$WORK_DIR" "$SQUASH_DIR" "$MERGED_SQUASHFS" 2>/dev/null || true; }
-trap cleanup EXIT
 
 say "${BLUE}###############################################${NC}"
 say "${BLUE}###   SONIX PLAYER -- FIRMWARE PACKER       ###${NC}"
@@ -244,10 +243,85 @@ if [ -n "$MISSING" ]; then
   macOS:          brew install p7zip squashfs cdrtools"
 fi
 
-[ -f "$PLAYER_BIN" ] || die "sonix_player is not next to this script."
+SEVEN_ZIP=$(command -v 7z)
+
+require_target_elf() {
+	local header
+	[ -f "$1" ] || die "Missing $(basename "$1"). Run make target first."
+	header="$(od -An -tx1 -N20 "$1" | tr -d ' \n')"
+	[ "${header:0:12}" = "7f454c460101" ] && [ "${header:32:8}" = "02000800" ] ||
+		die "$(basename "$1") must be a 32-bit little-endian MIPS executable."
+}
+
+require_target_elf "$PLAYER_BIN"
 
 ASSETS_DIR="$SCRIPT_DIR/assets"
 [ -d "$ASSETS_DIR" ] || die "there is no assets folder next to this script."
+
+# Rebuild the player on the exact R1 release that was tested on this board.
+# The kernel, modules, init, launcher, and recovery metadata come from that image.
+build_from_r1_release() (
+    export LC_ALL=C
+    local base="$1" work root resources assets size hash stamp
+    local expected=b78cb5a511b3c41245674f72ffb132b6bba987202b9f966738dcd1ffd76f7d7b
+    [ -f "$base" ] || die "Missing Sonix v1.3.1 R1 release image: $base"
+    work=$(mktemp -d "$SCRIPT_DIR/.r1-build.XXXXXX")
+    trap 'rm -rf "$work"' EXIT
+    # Hash the same private copy we subsequently unpack.
+    cp "$base" "$work/base.upt"
+    if command -v sha256sum >/dev/null; then
+        hash=$(sha256sum "$work/base.upt")
+    else
+        hash=$(shasum -a 256 "$work/base.upt")
+    fi
+    [ "${hash%% *}" = "$expected" ] || die "This build requires the published Sonix v1.3.1 R1 image."
+    step "Unpacking the verified R1 v1.3.1 release"
+    "$SEVEN_ZIP" x -tiso "$work/base.upt" -o"$work/iso" -y >/dev/null
+    local OTA_DIR="$work/iso/ota_v0"
+    root="$work/root"
+    cat "$OTA_DIR"/rootfs.squashfs.* > "$work/base.sq"
+    unsquashfs -d "$root" "$work/base.sq" >/dev/null
+    resources="$root/usr/resource/sonix"
+    assets="$ASSETS_DIR/R1/usr/resource/sonix"
+    install -m 755 "$PLAYER_BIN" "$root/usr/bin/sonix_player"
+    install -m 755 "$SCRIPT_DIR/verify-upt.sh" "$root/usr/bin/sonix_verify_upt.sh"
+    install -m 644 "$assets/fonts/"inter-*.ttf "$assets/fonts/INTER-LICENSE.txt" "$resources/fonts/"
+    mkdir -p "$resources/licenses"
+    install -m 644 "$assets/licenses/SCOWL.txt" "$resources/licenses/"
+    install -m 644 "$assets/language/"*.ini "$resources/language/"
+    stamp=$(get_stamp "$PLAYER_BIN")
+    sed_file 's/("build_version"[[:space:]]*:[[:space:]]*")[0-9]+/\1'"$stamp"'/' "$root/$SYSTEM_INFO"
+    grep -Fq "\"$stamp\"" "$root/$SYSTEM_INFO" || die "Could not update the build stamp."
+
+    step "Repacking the R1 filesystem"
+    mksquashfs "$root" "$work/new.sq" -comp lzo -b 131072 -all-root -noappend >/dev/null
+    size=$(get_size "$work/new.sq")
+    # Sector layout in the R1 recovery cloner: rootfs 0x580000..0x3280000.
+    [ "$size" -le 47185920 ] || die "Root filesystem exceeds the R1 partition ($size bytes)."
+    hash=$(get_md5 "$work/new.sq")
+    awk -v size="$size" -v sum="$hash" '
+        /^img_name=/ { root=($0=="img_name=rootfs.squashfs") }
+        root && /^img_size=/ { $0="img_size=" size }
+        root && /^img_md5=/ { $0="img_md5=" sum }
+        { print }
+    ' "$OTA_DIR/ota_update.in" > "$work/ota_update.in"
+    mv "$work/ota_update.in" "$OTA_DIR/ota_update.in"
+    rm -f "$OTA_DIR"/ota_md5_rootfs.squashfs.* "$OTA_DIR"/rootfs.squashfs.*
+    write_chunks rootfs.squashfs "$work/new.sq"
+    "$ISO_TOOL" -quiet -J -r -o "$work/r1.upt" "$work/iso"
+    "$SEVEN_ZIP" x -tiso "$work/r1.upt" -o"$work/check" -y >/dev/null
+    sh "$SCRIPT_DIR/verify-upt.sh" r1 "$work/check" --tree || die "Final R1 package failed verification."
+    mv -f "$work/r1.upt" "$SCRIPT_DIR/r1.upt"
+    say "    $SCRIPT_DIR/r1.upt (rootfs $size of 47185920 bytes)"
+)
+
+if [ "$#" -gt 0 ]; then
+    [ "$#" = 2 ] && [ "$1" = --r1-base ] || die "Usage: $0 [--r1-base path/to/v1.3.1/r1.upt]"
+    build_from_r1_release "$2"
+    exit
+fi
+
+trap cleanup EXIT
 
 # Which models can be built at all. A stock firmware that is not here is not an
 # error -- it is a model this person does not own.
@@ -281,10 +355,7 @@ fi
 # execs it, and a busybox shell that cannot exec it exits without starting the
 # player. The first 20 bytes of the ELF header say so.
 if [ -f "$LAUNCH_BIN" ]; then
-	ELF_HEAD="$(od -An -tx1 -N20 "$LAUNCH_BIN" | tr -d ' \n')"
-	[ "${ELF_HEAD:0:12}" = "7f454c460101" ] && [ "${ELF_HEAD:32:8}" = "02000800" ] ||
-		die "sonix_launch is not a 32-bit little-endian MIPS executable.
-	  Build it with \`make target\` (or \`make sonix_launch\`) in sonix-player."
+	require_target_elf "$LAUNCH_BIN"
 	say "    launch:  sonix_launch, $(get_size "$LAUNCH_BIN") bytes"
 else
 	warn "sonix_launch is not next to this script: the launcher keeps its shell for the whole session."
@@ -314,16 +385,36 @@ build_one() {
 	rm -rf "$WORK_DIR" "$SQUASH_DIR" "$MERGED_SQUASHFS"
 	mkdir -p "$WORK_DIR"
 
-	7z x "$SOURCE_UPT" -o"$WORK_DIR" -y > /dev/null
+	"$SEVEN_ZIP" x -tiso "$SOURCE_UPT" -o"$WORK_DIR" -y > /dev/null
 
 	[ -d "$OTA_DIR" ] || die "there is no ota_v0 folder inside the .upt: not a firmware of this kind."
 
 	say "    Joining the rootfs chunks..."
 	( cd "$OTA_DIR" && cat rootfs.squashfs.* ) > "$MERGED_SQUASHFS"
 
+	local stock_rootfs_bytes stock_rootfs_md5
+	stock_rootfs_bytes="$(get_size "$MERGED_SQUASHFS")"
+	stock_rootfs_md5="$(get_md5 "$MERGED_SQUASHFS")"
+	grep -A 2 '^img_name=rootfs.squashfs' "$OTA_DIR/ota_update.in" | tr -d '\r' |
+		grep -Fx "img_size=$stock_rootfs_bytes" >/dev/null || die "Stock rootfs size mismatch."
+	grep -A 2 '^img_name=rootfs.squashfs' "$OTA_DIR/ota_update.in" | tr -d '\r' |
+		grep -Fx "img_md5=$stock_rootfs_md5" >/dev/null || die "Stock rootfs checksum mismatch."
+	if [ "$MODEL_DIR" = R1 ] && [ -f "$OTA_DIR/ota_compatibility.in" ]; then
+		tr -d '\r' < "$OTA_DIR/ota_compatibility.in" | grep -Eq '^compatibility=hiby_r1(_|$)' ||
+			die "Stock firmware does not identify itself as a HiBy R1."
+	fi
+
 	say "    Extracting the filesystem..."
 	unsquashfs -f -d "$SQUASH_DIR" "$MERGED_SQUASHFS" > /dev/null
 	rm -f "$MERGED_SQUASHFS"
+
+    if [ "$MODEL_DIR" = R1 ]; then
+        [ -f "$SQUASH_DIR/module_driver/x1600_hiby_r1_sound_card.ko" ] || die "Missing R1 sound-card module."
+        if [ -f "$SQUASH_DIR/module_driver/r1_wireless_select.sh" ]; then
+            die "This stock R1 selects between two radios. The Sonix overlay supports Broadcom only.
+  For an R1 already running Sonix v1.3.1, use --r1-base with the published v1.3.1 R1 image."
+        fi
+    fi
 
 	# The old chunks go now: what gets written back must not sit next to what it
 	# replaces, or the image ends up carrying both.
@@ -349,6 +440,7 @@ build_one() {
 
 	cp -f "$PLAYER_BIN" "$SQUASH_DIR/usr/bin/sonix_player"
 	chmod 777 "$SQUASH_DIR/usr/bin/sonix_player"
+	install -m 755 "$SCRIPT_DIR/verify-upt.sh" "$SQUASH_DIR/usr/bin/sonix_verify_upt.sh"
 	say "    usr/bin/sonix_player installed (777)"
 	say ""
 
@@ -660,6 +752,8 @@ build_one() {
 
 	ORIGINAL_SUM="$(get_md5 "$ROOTFS_NEW")"
 	SIZE="$(get_size "$ROOTFS_NEW")"
+	[ "$SIZE" -le "$stock_rootfs_bytes" ] ||
+		die "New rootfs ($SIZE bytes) exceeds the verified stock image size ($stock_rootfs_bytes bytes)."
 	say "    rootfs.squashfs: $SIZE bytes, md5 $ORIGINAL_SUM"
 
 	step "[$MODEL_NAME] updating ota_update.in"
@@ -716,8 +810,9 @@ build_one() {
 	say ""
 
 	step "[$MODEL_NAME] writing $(basename "$OUTPUT_UPT")"
-	rm -f "$OUTPUT_UPT"
-	"$ISO_TOOL" -o "$OUTPUT_UPT" -J -r "$WORK_DIR" > /dev/null 2>&1
+	"$ISO_TOOL" -o "$SQUASH_DIR/output.upt" -J -r "$WORK_DIR" > /dev/null
+	"$SEVEN_ZIP" t -tiso "$SQUASH_DIR/output.upt" >/dev/null
+	mv -f "$SQUASH_DIR/output.upt" "$OUTPUT_UPT"
 
 	[ -f "$OUTPUT_UPT" ] || die "the image was not written."
 
