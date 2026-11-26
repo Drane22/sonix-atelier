@@ -685,6 +685,26 @@ static bool make_scaled(const raw_image_t *src, int box_w, int box_h, cover_fit_
 		crop = crop_to_aspect(src->w, src->h, box_w, box_h);
 		dst_w = box_w;
 		dst_h = box_h;
+	} else if (fit == COVER_FIT_PLAYER) {
+		// Preserve exact aspect ratio inside box_w x box_h without stretching or
+		// cropping; allow smooth bilinear upscale up to 1.6x so 300px sleeves fill
+		// the stage cleanly while tiny low-res thumbnails stay bounded.
+		crop = (crop_t){0, 0, src->w, src->h};
+		int max_w = src->w * 8 / 5;
+		int max_h = src->h * 8 / 5;
+		int lim_w = box_w < max_w ? box_w : max_w;
+		int lim_h = box_h < max_h ? box_h : max_h;
+		if ((int64_t)src->w * lim_h >= (int64_t)src->h * lim_w) {
+			dst_w = lim_w;
+			dst_h = (int)(((int64_t)src->h * lim_w + src->w / 2) / src->w);
+		} else {
+			dst_h = lim_h;
+			dst_w = (int)(((int64_t)src->w * lim_h + src->h / 2) / src->h);
+		}
+		if (dst_w < 1)
+			dst_w = 1;
+		if (dst_h < 1)
+			dst_h = 1;
 	} else {
 		// Whole picture, scaled down to fit the box, never blown up: a small
 		// cover looks better small than stretched.
@@ -1666,7 +1686,7 @@ bool cover_load_player_images(const char *filepath, int cover_w, int cover_h, co
 
 	if (cover_out) {
 		cover_index = n;
-		reqs[n++] = (image_request_t){.w = cover_w, .h = cover_h, .fit = COVER_FIT_COVER, .backdrop = false};
+		reqs[n++] = (image_request_t){.w = cover_w, .h = cover_h, .fit = COVER_FIT_PLAYER, .backdrop = false};
 	}
 	if (backdrop_out) {
 		backdrop_index = n;
@@ -1736,7 +1756,7 @@ bool cover_load_shared(const char *filepath, int player_w, int player_h, int siz
 	bool have = id && player_cover_load(id, player_w, player_h, &big);
 	bool keyed = have; // whether `id` describes the picture in `big`
 	if (!have) {
-		image_request_t req = {.w = player_w, .h = player_h, .fit = COVER_FIT_COVER, .backdrop = false};
+		image_request_t req = {.w = player_w, .h = player_h, .fit = COVER_FIT_PLAYER, .backdrop = false};
 		int used = -1;
 		if (build_from_sources_at(filepath, false, &req, 1, &big, &used, NULL) != COVER_BUILD_OK) {
 			return false;
@@ -1752,7 +1772,7 @@ bool cover_load_shared(const char *filepath, int player_w, int player_h, int siz
 	cover_tone_attach(keyed ? id : 0, &big);
 
 	// Then down to the size asked for.
-	if (player_w == size && player_h == size) {
+	if ((int)big.dsc.header.w == size && (int)big.dsc.header.h == size) {
 		*out = big;
 		return true;
 	}
@@ -1764,6 +1784,53 @@ bool cover_load_shared(const char *filepath, int player_w, int player_h, int siz
 		return false;
 	}
 	ok = make_scaled(&raw, size, size, COVER_FIT_COVER, out);
+	raw_free(&raw);
+	if (ok) {
+		out->has_tone = tones.has_tone;
+		out->tone = tones.tone;
+		out->tone_luma = tones.tone_luma;
+		out->tone_light = tones.tone_light;
+	}
+	return ok;
+}
+
+bool cover_load_carousel(const char *filepath, int player_w, int player_h, int preview_box, cover_image_t *out) {
+	memset(out, 0, sizeof(*out));
+	if (!filepath || player_w <= 0 || player_h <= 0 || preview_box <= 0) {
+		return false;
+	}
+
+	int source_index = -1;
+	uint64_t id = player_source_id(filepath, &source_index);
+	cover_image_t big;
+	bool have = id && player_cover_load(id, player_w, player_h, &big);
+	bool keyed = have;
+	if (!have) {
+		image_request_t req = {.w = player_w, .h = player_h, .fit = COVER_FIT_PLAYER, .backdrop = false};
+		int used = -1;
+		if (build_from_sources_at(filepath, false, &req, 1, &big, &used, NULL) != COVER_BUILD_OK) {
+			return false;
+		}
+		keyed = id && used == source_index;
+		if (keyed) {
+			player_cover_store(id, player_w, player_h, &big);
+		}
+	}
+
+	cover_tone_attach(keyed ? id : 0, &big);
+
+	if ((int)big.dsc.header.w <= preview_box && (int)big.dsc.header.h <= preview_box) {
+		*out = big;
+		return true;
+	}
+	raw_image_t raw;
+	bool ok = raw_from_cover(&big, &raw);
+	cover_image_t tones = big;
+	cover_free(&big);
+	if (!ok) {
+		return false;
+	}
+	ok = make_scaled(&raw, preview_box, preview_box, COVER_FIT_PLAYER, out);
 	raw_free(&raw);
 	if (ok) {
 		out->has_tone = tones.has_tone;
@@ -2452,7 +2519,7 @@ void cover_book_store(const char *path, int box_w, int box_h, const cover_image_
 #define PLAYER_ID_MAX_ROWS 20000
 #define PLAYER_ID_PRUNE_EVERY 256
 // Part of every cover key: raising it makes every stored cover a miss.
-#define PLAYER_COVER_EPOCH 1
+#define PLAYER_COVER_EPOCH 2
 
 static uint64_t fnv1a(const char *text) {
 	uint64_t h = 1469598103934665603ULL;

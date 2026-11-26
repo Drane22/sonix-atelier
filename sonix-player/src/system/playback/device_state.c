@@ -13,6 +13,8 @@
 #include "src/system/playback/audiobook.h"
 #include "src/system/playback/playhistory.h"
 #include "src/system/playback/playlist.h"
+#include "src/system/bluetooth/btreceiver.h"
+#include "src/system/remote/airplay.h"
 #include "src/system/remote/dlna.h"
 #include "src/system/streaming/podcast.h"
 #include "src/system/streaming/podcastcache.h"
@@ -423,7 +425,169 @@ static void queue_persist(void) {
 	free(list);
 }
 
-void device_state_queue_changed(void) { queue_persist(); }
+#define MAX_QUEUE_CBS 4
+static device_state_queue_cb_t queue_cbs[MAX_QUEUE_CBS];
+static int queue_cb_count;
+
+void device_state_register_queue_cb(device_state_queue_cb_t cb) {
+	if (!cb || queue_cb_count >= MAX_QUEUE_CBS) {
+		return;
+	}
+	for (int i = 0; i < queue_cb_count; i++) {
+		if (queue_cbs[i] == cb) {
+			return;
+		}
+	}
+	queue_cbs[queue_cb_count++] = cb;
+}
+
+void device_state_queue_changed(void) {
+	queue_persist();
+	for (int i = 0; i < queue_cb_count; i++) {
+		queue_cbs[i]();
+	}
+}
+
+bool device_state_peek_up_next(device_up_next_t *out) {
+	if (!out) {
+		return false;
+	}
+	memset(out, 0, sizeof(*out));
+
+	if (!current_metadata_file[0] || radio_is_active() || dlna_owns_playback() || btreceiver_is_active()) {
+		return false;
+	}
+
+	airplay_state_t air;
+	airplay_get_state(&air);
+	if (air.playing) {
+		return false;
+	}
+
+	if (podcastcache_is_episode(current_metadata_file) && podcast_stop_at_episode_end()) {
+		return false;
+	}
+
+	if (audiobook_is_playing()) {
+		if (!audiobook_has_next_part()) {
+			return false;
+		}
+		char next_path[512];
+		int next_idx = -1;
+		bool repeat_one = false;
+		if (!playlist_peek_auto_detail(next_path, sizeof(next_path), &next_idx, &repeat_one)) {
+			return false;
+		}
+		int total = playlist_count();
+		out->valid = true;
+		snprintf(out->path, sizeof(out->path), "%s", next_path);
+		if (total > 1 && next_idx >= 0) {
+			out->queue_pos = next_idx + 1;
+			out->queue_total = total;
+		}
+		out->is_repeat_one = repeat_one;
+		out->is_audiobook = true;
+		return true;
+	}
+
+	if (playlist_at_end() && !playlist_is_ordered() && playlist_get_mode() != PLAYBACK_MODE_REPEAT_ONE) {
+		const char *album = playlist_album();
+		if (album && album[0] && device_state_album_chaining()) {
+			return false;
+		}
+		if (device_state_folder_chaining() && !playlist_is_custom()) {
+			return false;
+		}
+	}
+
+	char next_path[512];
+	int next_idx = -1;
+	bool repeat_one = false;
+	if (!playlist_peek_auto_detail(next_path, sizeof(next_path), &next_idx, &repeat_one)) {
+		return false;
+	}
+
+	int total = playlist_count();
+	out->valid = true;
+	snprintf(out->path, sizeof(out->path), "%s", next_path);
+	if (total > 1 && next_idx >= 0) {
+		out->queue_pos = next_idx + 1;
+		out->queue_total = total;
+	}
+	out->is_repeat_one = repeat_one;
+	out->is_podcast = podcastcache_is_episode(next_path);
+	out->is_streaming = qobuzcache_owns(next_path) || tidalcache_owns(next_path);
+	return true;
+}
+
+bool device_state_can_skip_track(void) {
+	if (!current_metadata_file[0] || radio_is_active() || dlna_owns_playback() || btreceiver_is_active()) {
+		return false;
+	}
+
+	airplay_state_t air;
+	airplay_get_state(&air);
+	if (air.playing) {
+		return false;
+	}
+
+	// Audiobooks and podcasts use on-screen Prev/Next for second-jumps, not track skips.
+	if (audiobook_is_playing() || podcastcache_is_episode(current_metadata_file)) {
+		return false;
+	}
+
+	return playlist_count() > 0;
+}
+
+bool device_state_peek_adjacent(int dir, device_up_next_t *out) {
+	if (!out) {
+		return false;
+	}
+	memset(out, 0, sizeof(*out));
+	if (dir != -1 && dir != 1) {
+		return false;
+	}
+
+	if (!device_state_can_skip_track()) {
+		return false;
+	}
+
+	int total = playlist_count();
+	int pos = playlist_current_index();
+	if (total <= 0 || pos < 0 || pos >= total) {
+		return false;
+	}
+
+	int target_idx = pos + dir;
+	if (target_idx < 0 || target_idx >= total) {
+		const char *album = playlist_album();
+		bool chaining = (album && album[0] && device_state_album_chaining()) ||
+						(device_state_folder_chaining() && !playlist_is_custom());
+		playback_mode_t mode = playlist_get_mode();
+		bool redeal = dir > 0 && !playlist_is_ordered() &&
+					  (mode == PLAYBACK_MODE_SHUFFLE || mode == PLAYBACK_MODE_SHUFFLE_REPEAT);
+		if (chaining || redeal || total == 1) {
+			return false;
+		}
+		target_idx = dir > 0 ? 0 : total - 1;
+	}
+
+	char target_path[512];
+	if (!playlist_path_at(target_idx, target_path, sizeof(target_path)) || !target_path[0]) {
+		return false;
+	}
+
+	out->valid = true;
+	snprintf(out->path, sizeof(out->path), "%s", target_path);
+	if (total > 1) {
+		out->queue_pos = target_idx + 1;
+		out->queue_total = total;
+	}
+	out->is_repeat_one = false;
+	out->is_podcast = podcastcache_is_episode(target_path);
+	out->is_streaming = qobuzcache_owns(target_path) || tidalcache_owns(target_path);
+	return true;
+}
 
 // One per streaming service plus headroom: four is already twice as many as
 // exist.
@@ -554,7 +718,7 @@ static void load_and_play_at(const char *filepath, double position) {
 		current_metadata_file[sizeof(current_metadata_file) - 1] = '\0';
 	}
 
-	metadata_read(current_metadata_file, &current_metadata);
+	metadata_read_for_playback(current_metadata_file, &current_metadata);
 	// Whether the loaded file is an audiobook is decided here, once per track
 	// change, and everything that dresses the player for one reads the answer
 	// from it. Every route by which the track can change passes through one of
@@ -605,7 +769,7 @@ static void load_paused(const char *filepath) {
 	if (filepath != current_metadata_file) {
 		snprintf(current_metadata_file, sizeof(current_metadata_file), "%s", filepath);
 	}
-	metadata_read(current_metadata_file, &current_metadata);
+	metadata_read_for_playback(current_metadata_file, &current_metadata);
 	audiobook_track_changed(current_metadata_file);
 	replaygain_load(&current_metadata);
 	apply_track_speed();
@@ -642,7 +806,7 @@ void device_state_restore_file(const char *filepath, double position) {
 
 	strncpy(current_metadata_file, filepath, sizeof(current_metadata_file) - 1);
 	current_metadata_file[sizeof(current_metadata_file) - 1] = '\0';
-	metadata_read(current_metadata_file, &current_metadata);
+	metadata_read_for_playback(current_metadata_file, &current_metadata);
 	// Whether the loaded file is an audiobook is decided here, once per track
 	// change, and everything that dresses the player for one reads the answer
 	// from it. Every route by which the track can change passes through one of
@@ -725,7 +889,7 @@ void device_state_restore_index(library_index_t *ix, int start_index, const char
 
 	strncpy(current_metadata_file, path, sizeof(current_metadata_file) - 1);
 	current_metadata_file[sizeof(current_metadata_file) - 1] = '\0';
-	metadata_read(current_metadata_file, &current_metadata);
+	metadata_read_for_playback(current_metadata_file, &current_metadata);
 	audiobook_track_changed(current_metadata_file);
 	replaygain_load(&current_metadata);
 	apply_track_speed();
@@ -771,7 +935,7 @@ void device_state_restore_list(const char *const *list, int count, int start_ind
 
 	strncpy(current_metadata_file, path, sizeof(current_metadata_file) - 1);
 	current_metadata_file[sizeof(current_metadata_file) - 1] = '\0';
-	metadata_read(current_metadata_file, &current_metadata);
+	metadata_read_for_playback(current_metadata_file, &current_metadata);
 	// Whether the loaded file is an audiobook is decided here, once per track
 	// change, and everything that dresses the player for one reads the answer
 	// from it. Every route by which the track can change passes through one of
@@ -818,7 +982,7 @@ void device_state_play_file_at(const char *filepath, double position) {
 		strncpy(current_metadata_file, filepath, sizeof(current_metadata_file) - 1);
 		current_metadata_file[sizeof(current_metadata_file) - 1] = '\0';
 	}
-	metadata_read(current_metadata_file, &current_metadata);
+	metadata_read_for_playback(current_metadata_file, &current_metadata);
 	audiobook_track_changed(current_metadata_file);
 	// The ReplayGain the tags asked for, worked out once per track.
 	replaygain_load(&current_metadata);

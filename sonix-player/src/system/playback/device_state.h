@@ -64,6 +64,37 @@ void device_state_restore_file(const char *filepath, double position); // paused
 // step for long.
 void device_state_queue_changed(void);
 
+typedef struct {
+	bool valid;
+	char path[512];
+	int queue_pos;	   // 1-based playback-order position (0 if single/hidden)
+	int queue_total;   // total queue length (0 if single/hidden)
+	bool is_repeat_one; // true when REPEAT_ONE will replay current track
+	bool is_podcast;   // true when upcoming path is a podcast episode
+	bool is_audiobook; // true when upcoming path is a multi-part audiobook part
+	bool is_streaming; // true when upcoming path belongs to Qobuz/Tidal cache
+} device_up_next_t;
+
+// Non-mutating lookahead matching device_state_advance_auto() and
+// handle_track_finished() rules. Returns false (and clears *out) when no
+// deterministic upcoming track exists (never fabricates metadata).
+bool device_state_peek_up_next(device_up_next_t *out);
+
+bool device_state_can_skip_track(void);
+
+// Non-mutating lookahead of the adjacent track in the active queue for the Now
+// Playing cover carousel (`dir` = -1 for previous, +1 for next). Respects
+// dealt shuffle order, REPEAT_ALL wraparound, and ordered/normal queue bounds,
+// and returns false whenever adjacent navigation is unknown (e.g. end of a
+// shuffle round before the next deal) or non-track-based (radio, books,
+// podcast skip mode, DLNA, AirPlay).
+bool device_state_peek_adjacent(int dir, device_up_next_t *out);
+
+// Observer invoked on the GUI thread when device_state_queue_changed() runs
+// (manual Add Next / Add End / remove / reorder).
+typedef void (*device_state_queue_cb_t)(void);
+void device_state_register_queue_cb(device_state_queue_cb_t cb);
+
 // The boot-time restore for a queue that was a library list: the handle stands
 // in for the list of paths. Takes ownership of `ix`.
 //

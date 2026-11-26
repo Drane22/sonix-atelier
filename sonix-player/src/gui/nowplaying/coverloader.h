@@ -26,8 +26,13 @@
 // album carousel takes 84..89; and the cover at the head of an album's tracks
 // takes 90; the podcasts on the card take 91..102 for their twelve rows, 103
 // for the cover at the head of one of them and 104..107 for the episodes being
-// listened to -- so the pools never trample each other's requests.
-#define COVERLOADER_SLOTS 108
+// listened to; 108 is reserved for the upcoming track preview and 109 for the
+// homepage mini-player -- so the pools never trample each other's requests.
+#define COVERLOADER_SLOTS 112
+#define COVERLOADER_UPNEXT 108
+#define COVERLOADER_MINIPLAYER 109
+#define COVERLOADER_CAROUSEL_PREV 110
+#define COVERLOADER_CAROUSEL_NEXT 111
 #define COVERLOADER_SEARCH_BASE 36
 #define COVERLOADER_SEARCH_COUNT 24
 #define COVERLOADER_AUDIOBOOKS_BASE 60
@@ -56,6 +61,10 @@ void coverloader_request(int slot, const char *path, int size);
 // table of covers serves it, and is filled by it. What an album's head asks
 // with.
 void coverloader_request_shared(int slot, const char *path, int size, int player_w, int player_h);
+
+// Adjacent Now Playing carousel cover: warms player_covers at player_w x
+// player_h and scales to preview_box keeping aspect ratio and tone metadata.
+void coverloader_request_carousel(int slot, const char *path, int preview_box, int player_w, int player_h);
 
 // Forgets the slot: anything pending is abandoned and anything already decoded
 // for it is freed.

@@ -36,7 +36,7 @@
 // done then is work nobody ever waits for.
 // ---------------------------------------------------------------------------
 
-#define WAVEFORM_BARS 48
+#define WAVEFORM_BARS 72
 
 // Where waveform.dat lives -- normally .local on the card. Call once at
 // startup, before anything asks for a waveform. A directory that cannot be

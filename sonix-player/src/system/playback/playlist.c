@@ -621,6 +621,8 @@ void playlist_load_paths_ordered(const char *const *list, int count, int start_i
 	order_identity(start);
 }
 
+bool playlist_is_ordered(void) { return ordered_queue; }
+
 bool playlist_insert_next(const char *path) {
 	if (!path || !path[0]) {
 		return false;
@@ -1252,11 +1254,12 @@ bool playlist_advance_auto(char *out, size_t out_size) {
 	return playlist_current_path(out, out_size);
 }
 
-bool playlist_peek_auto(char *out, size_t out_size) {
-	if (entry_count == 0 || !out) {
+bool playlist_peek_auto_detail(char *out, size_t out_size, int *next_index_out, bool *repeat_one_out) {
+	if (entry_count == 0) {
 		return false;
 	}
 	size_t next;
+	bool rep_one = false;
 	if (ordered_queue) {
 		if (pos + 1 >= entry_count) {
 			return false;
@@ -1266,6 +1269,7 @@ bool playlist_peek_auto(char *out, size_t out_size) {
 		switch (mode) {
 		case PLAYBACK_MODE_REPEAT_ONE:
 			next = pos;
+			rep_one = true;
 			break;
 		case PLAYBACK_MODE_REPEAT_ALL:
 			next = (pos + 1) % entry_count;
@@ -1283,7 +1287,23 @@ bool playlist_peek_auto(char *out, size_t out_size) {
 			break;
 		}
 	}
-	return playlist_path_at((int)next, out, out_size);
+	if (out && out_size > 0 && !playlist_path_at((int)next, out, out_size)) {
+		return false;
+	}
+	if (next_index_out) {
+		*next_index_out = (int)next;
+	}
+	if (repeat_one_out) {
+		*repeat_one_out = rep_one;
+	}
+	return true;
+}
+
+bool playlist_peek_auto(char *out, size_t out_size) {
+	if (!out || out_size == 0) {
+		return false;
+	}
+	return playlist_peek_auto_detail(out, out_size, NULL, NULL);
 }
 
 bool playlist_next(char *out, size_t out_size) {

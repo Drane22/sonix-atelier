@@ -39,6 +39,7 @@ void playlist_load_paths(const char *const *list, int count, int start_index);
 // shuffling a sequence breaks it rather than reordering it. Stops at the end,
 // like a normal queue.
 void playlist_load_paths_ordered(const char *const *list, int count, int start_index);
+bool playlist_is_ordered(void);
 
 // Puts `path` into the queue right after the track playing now ("add to
 // queue"). Adding a second track puts it after the first one added, a third
@@ -233,6 +234,7 @@ bool playlist_advance_auto(char *out, size_t out_size);
 // it would stop, or when what comes next is not decided yet (a new shuffle
 // deal).
 bool playlist_peek_auto(char *out, size_t out_size);
+bool playlist_peek_auto_detail(char *out, size_t out_size, int *next_index_out, bool *repeat_one_out);
 
 // User-initiated next/prev, walking the playback order. Copy the new track's
 // path into `out`; return false only when the queue is empty.

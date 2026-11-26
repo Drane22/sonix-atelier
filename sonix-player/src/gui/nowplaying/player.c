@@ -7,685 +7,722 @@
 #include <string.h>
 #include <sys/stat.h>
 
-#include "src/gui/library/browser.h"
+#include "src/gui/fonts/fonts.h"
 #include "src/gui/library/audiobookextras.h"
+#include "src/gui/library/browser.h"
+#include "src/gui/library/medialist.h"
+#include "src/gui/nowplaying/ambient_palette.h"
 #include "src/gui/nowplaying/chapters.h"
 #include "src/gui/nowplaying/cover.h"
 #include "src/gui/nowplaying/coverloader.h"
 #include "src/gui/nowplaying/lyricsearch.h"
-#include "src/gui/library/medialist.h"
-#include "src/gui/fonts/fonts.h"
+#include "src/gui/nowplaying/trackmenu.h"
+#include "src/gui/nowplaying/upnext.h"
 #include "src/gui/shell/confirm.h"
 #include "src/gui/shell/gui.h"
 #include "src/gui/shell/icons.h"
 #include "src/gui/shell/popover.h"
 #include "src/gui/shell/quickpanel.h"
 #include "src/gui/shell/scrolltext.h"
-#include "src/gui/nowplaying/trackmenu.h"
 #include "src/gui/shell/switcher.h"
 #include "src/gui/shell/theme.h"
 #include "src/gui/shell/toast.h"
 #include "src/gui/shell/topbar.h"
-#include "src/system/device/power.h"
-#include "src/system/playback/sleeptimer.h"
-#include "src/system/gearboy/gearboy.h"
-#include "src/system/streaming/radio.h"
 #include "src/system/audio/audio.h"
 #include "src/system/audio/readahead.h"
-#include "src/system/playback/audiobook.h"
-#include "src/system/playback/device_state.h"
-#include "src/system/remote/airplay.h"
-#include "src/system/remote/dlna.h"
+#include "src/system/audio/waveform.h"
 #include "src/system/bluetooth/btreceiver.h"
 #include "src/system/core/config.h"
 #include "src/system/core/lang.h"
+#include "src/system/core/utils.h"
+#include "src/system/device/led.h"
+#include "src/system/device/power.h"
 #include "src/system/library/library.h"
 #include "src/system/library/lrclib.h"
 #include "src/system/library/lyrics.h"
-#include "src/system/device/led.h"
+#include "src/system/net/wifi.h"
+#include "src/system/playback/audiobook.h"
+#include "src/system/playback/device_state.h"
 #include "src/system/playback/playlist.h"
+#include "src/system/playback/sleeptimer.h"
+#include "src/system/gearboy/gearboy.h"
+#include "src/system/remote/airplay.h"
+#include "src/system/remote/dlna.h"
 #include "src/system/streaming/podcast.h"
 #include "src/system/streaming/podcastcache.h"
-#include "src/system/streaming/podcastsubs.h"
 #include "src/system/streaming/podcaststate.h"
+#include "src/system/streaming/podcastsubs.h"
 #include "src/system/streaming/qobuzcache.h"
 #include "src/system/streaming/qobuzsync.h"
+#include "src/system/streaming/radio.h"
 #include "src/system/streaming/tidalcache.h"
 #include "src/system/streaming/tidalsync.h"
-#include "src/system/core/utils.h"
-#include "src/system/audio/waveform.h"
-#include "src/system/net/wifi.h"
 
-#include "lvgl/src/core/lv_obj_event_private.h"
 #include "lvgl/lvgl.h"
+
+// ===========================================================================
+// Sonix Atelier — Ambient Edition
+// Now Playing & First-Class Synchronized Lyrics Experience
+// ===========================================================================
 
 lv_obj_t *player_screen;
 
-static lv_obj_t *player_menu;
-static lv_obj_t *play_btn;
-static lv_obj_t *play_btn_icon;
+// Motion & polling timings (ms)
+#define POLL_PERIOD_PLAYING_MS 500
+#define POLL_PERIOD_IDLE_MS 2000
+#define SMOOTH_PERIOD_MS 60
+#define POLLS_FAST_AFTER_STOP 4
+#define COVER_POLL_MS 30
+
+#define CAROUSEL_SLIDE_MS 240
+#define PALETTE_TRANSITION_MS 280
+#define LYRICS_MODE_ANIM_MS 220
+#define LYRICS_SCROLL_MS 250
+#define SHEET_ANIM_MS 220
+
+#define CAROUSEL_PEEK_PX 14
+#define CAROUSEL_GAP_PX 12
+#define CAROUSEL_DRAG_PX 10
+#define BADGE_INSET 12
+
+#define WAVE_BAR_SOLID 4
+#define WAVE_BAR_GAP 2
+#define WAVE_BAR_PITCH (WAVE_BAR_SOLID + WAVE_BAR_GAP)
+#define WAVE_MIN_HALF 2
+#define WAVE_TODO_OPA 145
+
+#define LYRICS_USER_HOLD_MS 8000
+#define LYRICS_TAP_WAIT_MS 2000
+#define LYRICS_LINE_GAP_INT 14
+#define LYRICS_LINE_GAP_FS 18
+#define LYRICS_OFFSET_STEP_MS 100
+#define LYRICS_OFFSET_LIMIT_MS 5000
+
+typedef enum {
+	LYRICS_VIEW_NONE = 0,
+	LYRICS_VIEW_INTEGRATED = 1,
+	LYRICS_VIEW_FULLSCREEN = 2,
+} lyrics_view_state_t;
+
+// ---------------------------------------------------------------------------
+// Geometry & Preferences State
+// ---------------------------------------------------------------------------
+
+static int screen_w = 480;
+static int screen_h = 800;
+static int bar_height = 44;
+static bool bar_always = true;
+static bool is_tall_panel = true; // true on HiBy R1 (480x800), false on R3PII (480x720)
+
+static int content_w = 430;  // 72 * 6 - 2 = 430 px exact integer grid
+static int side_margin = 25; // (480 - 430) / 2
+static int header_y = 34;
+static int header_h = 40;
+static int stage_y = 76;
+static int stage_h = 432;
+static int hero_box = 430;
+static int peek_box = 340;
+static int wave_h = 34;
+
+static player_layout_t layout_choice = PLAYER_LAYOUT_STANDARD;
+static bool adaptive_accent = true;
+static player_lyrics_mode_t lyrics_default_mode = PLAYER_LYRICS_INTEGRATED;
+static bool lyrics_remember_mode = true;
+static player_lyrics_mode_t lyrics_last_mode = PLAYER_LYRICS_INTEGRATED;
+static player_lyrics_text_size_t lyrics_text_size = PLAYER_LYRICS_TEXT_MEDIUM;
+static int lyrics_offset_ms = 0;
+
+// Remembered shuffle flag so cycling Repeat through REPEAT_ONE and back keeps
+// shuffle enabled when the user had Shuffle switched on.
+static bool shuffle_remembered = false;
+
+// ---------------------------------------------------------------------------
+// Palette & Animation State
+// ---------------------------------------------------------------------------
+
+static ambient_palette_t pal_cur;
+static ambient_palette_t pal_from;
+static ambient_palette_t pal_target;
+static int pal_anim_tag;
+
+static uint32_t current_raw_tone = 0;
+static int current_mean_luma = -1;
+static bool current_has_cover = false;
+
+// ---------------------------------------------------------------------------
+// Widget Tree Handles
+// ---------------------------------------------------------------------------
+
+// Header
+static lv_obj_t *header_row;
+static lv_obj_t *header_title_label;
+static lv_obj_t *more_btn_obj;
+static lv_obj_t *more_btn_icon;
+
+// Center stage: Carousel (Mode 0) + Integrated Lyrics (Mode A)
+static lv_obj_t *stage_container;
+static lv_obj_t *carousel_stage;
+
+typedef struct {
+	lv_obj_t *frame;
+	lv_obj_t *placeholder;
+	lv_obj_t *img;
+	cover_image_t cover;
+	bool has_cover;
+	char path[512];
+} carousel_slot_t;
+
+static carousel_slot_t cslots[3]; // 0 = prev, 1 = curr (hero), 2 = next
+static bool carousel_has_prev;
+static bool carousel_has_next;
+static bool prev_cover_pending;
+static bool next_cover_pending;
+static int32_t carousel_offset_px; // horizontal translation from resting positions
+static int carousel_anim_tag;
+
+// Source badges on hero frame
+static lv_obj_t *live_badge;
+static lv_obj_t *qobuz_badge;
+static lv_obj_t *tidal_badge;
+static lv_obj_t *podcast_badge;
+
+// Drag Up-Next / Previous preview caption inside carousel_stage
+static lv_obj_t *drag_caption_pill;
+static lv_obj_t *drag_caption_label;
+
+// Track Info Row
+static lv_obj_t *track_info_row;
 static lv_obj_t *song_title_label;
 static lv_obj_t *song_artist_label;
-static lv_obj_t *format_label; // "16/44.1 FLAC", right of the artist line
-static lv_obj_t *fav_btn_obj;  // the button it sits on, hidden on a book
-static lv_obj_t *controls_row; // transport row: where the ellipsis lives, and the star in Studio
-static lv_obj_t *fav_btn_icon; // the star above it
+static lv_obj_t *fav_btn_obj;
+static lv_obj_t *fav_btn_icon;
 
-static void update_fav_button(void);
-static void update_speed_button(void);
-static void update_format_label(const device_state_t *state);
-static void update_repeat_button(void);
-
-// The colour the chrome on this page is drawn in: the theme's accent normally,
-// and the sleeve's own while the alternative layout is up. Everything else on
-// that layout takes its colour from the record -- the pills, the star's disc,
-// the shape of the track -- and a blue play button in the middle of it was the
-// one thing that still belonged to some other page.
-static lv_color_t chrome_accent(void);
+// Waveform & Seek Section
+static lv_obj_t *wave_section;
+static lv_obj_t *wave_box;
+static lv_obj_t *wave_canvas;
+static uint8_t *wave_buf;
+static int wave_w;
+static uint8_t wave_bars[WAVEFORM_BARS];
+static int wave_ready;
+static int wave_drawn_px = -1;
+static uint32_t wave_drawn_sig = 0;
 static lv_obj_t *progress_slider;
-static lv_obj_t *elapsed_label; // start of the track, under the left end of the bar
-static lv_obj_t *remaining_label; // end of the track, under the right end
-// Where this track sits in the queue, between the two clocks: the row under the
-// bar had an empty middle and the question -- how much of this is left -- is the
-// same one the clocks answer.
-static lv_obj_t *queue_position_label;
-static lv_obj_t *repeat_btn_icon;
-static lv_obj_t *prev_icon; // static so the over-cover recolor can reach them
+static lv_obj_t *meta_clocks_row;
+static lv_obj_t *elapsed_label;
+static lv_obj_t *format_label;
+static lv_obj_t *remaining_label;
+
+// 5-Button Transport Row
+static lv_obj_t *controls_row;
+static lv_obj_t *shuffle_btn_obj;
+static lv_obj_t *shuffle_btn_icon;
+static lv_obj_t *shuffle_dot;
+static lv_obj_t *prev_btn_obj;
+static lv_obj_t *prev_icon;
+static lv_obj_t *play_btn;
+static lv_obj_t *play_btn_icon;
+static lv_obj_t *next_btn_obj;
 static lv_obj_t *next_icon;
+static lv_obj_t *repeat_btn_obj;
+static lv_obj_t *repeat_btn_icon;
+static lv_obj_t *repeat_dot;
+static lv_obj_t *speed_btn_obj;
+static lv_obj_t *speed_btn_icon;
+
+// Bottom Shortcuts Row
+static lv_obj_t *shortcuts_row;
+static lv_obj_t *lyrics_shortcut_btn;
+static lv_obj_t *lyrics_shortcut_icon;
+static lv_obj_t *lyrics_shortcut_label;
+static lv_obj_t *upnext_bearing_btn;
+static lv_obj_t *upnext_bearing_label;
+static lv_obj_t *queue_shortcut_btn;
+static lv_obj_t *queue_shortcut_icon;
+static lv_obj_t *queue_shortcut_label;
+
+// Lyrics Shared Model & Mode A / Mode B Containers
+static lyrics_view_state_t lyrics_state = LYRICS_VIEW_NONE;
+static lv_obj_t *integrated_lyrics_box;
+static lv_obj_t *int_lyrics_search_btn;
+static lv_obj_t *int_lyrics_search_icon;
+static lv_obj_t *int_lyrics_expand_btn;
+static lv_obj_t *int_lyrics_expand_icon;
+
+static lv_obj_t *fullscreen_lyrics_box;
+static lv_obj_t *fs_header_row;
+static lv_obj_t *fs_thumb_box;
+static lv_obj_t *fs_thumb_fallback;
+static lv_obj_t *fs_thumb_img;
+static cover_image_t fs_thumb_cover;
+static bool fs_has_thumb;
+static lv_obj_t *fs_title_label;
+static lv_obj_t *fs_artist_label;
+static lv_obj_t *fs_size_btn;
+static lv_obj_t *fs_size_icon;
+static lv_obj_t *fs_offset_toggle_btn;
+static lv_obj_t *fs_offset_toggle_label;
+static lv_obj_t *fs_close_btn;
+static lv_obj_t *fs_close_icon;
+
+static lv_obj_t *fs_offset_bar;
+static lv_obj_t *fs_offset_minus_btn;
+static lv_obj_t *fs_offset_value_btn;
+static lv_obj_t *fs_offset_value_label;
+static lv_obj_t *fs_offset_plus_btn;
+static lv_obj_t *fs_offset_search_btn;
+static lv_obj_t *fs_offset_search_icon;
+static bool fs_offset_bar_open;
+
+static lv_obj_t *fs_stage_area;
+static lv_obj_t *fs_bottom_deck;
+static lv_obj_t *fs_slider;
+static lv_obj_t *fs_elapsed_label;
+static lv_obj_t *fs_duration_label;
+static lv_obj_t *fs_prev_btn;
+static lv_obj_t *fs_prev_icon;
+static lv_obj_t *fs_play_btn;
+static lv_obj_t *fs_play_icon;
+static lv_obj_t *fs_next_btn;
+static lv_obj_t *fs_next_icon;
+
+// Shared lyrics viewport & empty state (reparented between Mode A & Mode B)
+static lv_obj_t *lyrics_view;
+static lv_obj_t *lyrics_empty_box;
+static lv_obj_t *lyrics_empty_icon;
+static lv_obj_t *lyrics_empty_label;
+static lv_obj_t *lyrics_empty_search_btn;
+static lv_obj_t *lyrics_empty_search_label;
+static lv_obj_t *resume_sync_btn;
+static lv_obj_t *resume_sync_label;
+
+static lyrics_t lyrics_cur;
+static bool lyrics_loaded;
+static char lyrics_path[1024];
+static unsigned lyrics_generation;
+static int lyrics_lit = -1;
+static bool lyrics_manual_hold;
+static uint32_t lyrics_user_until;
+static bool lyrics_centred;
+static int32_t lyrics_tap_ms = -1;
+static uint32_t lyrics_tap_until;
+
+// Playback & Timers State
 static lv_timer_t *progress_slider_timer;
-
-// Runs only while a sleep timer is counting, which is the only time there is
-// anything to ask. Paused otherwise, so an option nobody switched on does not
-// wake the main loop once a second all night.
-static lv_timer_t *sleep_timer;
-
-// Where playback was when the poll last asked, and when that was. The tick is
-// lv_tick_get()'s, which is the same clock the timer is driven by.
 static lv_timer_t *smooth_timer;
-static bool sheet_open; // the player panel is the page on show
+static lv_timer_t *sleep_timer;
+static lv_timer_t *cover_poll_timer;
 
-// "Always show the status bar" (Settings > Appearance): the bar stays up over
-// the player too. Over the picture that runs to the top edge -- Standard and
-// Waveform -- it blurs and dims what lies under it as it is drawn, like the
-// block behind the controls; Studio, whose whole background is that blurred
-// picture already, moves down under it instead, the chevron and the heading
-// with it (back_btn_player_below_bar).
-static bool bar_always;
-static int bar_height; // the status bar's, from the config
-static void bar_over_player_update(void);
+static bool sheet_open;
+static int sheet_width;
+static lv_obj_t *sheet_under;
+static int drag_origin_x;
+static lv_point_t drag_start_point;
+static bool dragging;
+static bool drag_committed;
+
 static double progress_anchor_secs;
 static uint32_t progress_anchor_tick;
 static bool progress_running;
+static int polls_since_stop = POLLS_FAST_AFTER_STOP;
+static double current_total_length;
+static double view_start;
+static double view_length;
+static char progress_label_text[32];
+static bool slider_dragging;
 
-// The smoothing runs only while there is a bar moving on a sheet that can be
-// seen: sixteen wake-ups a second for a panel that is closed or dark are pure
-// drain. Asked again by every poll, which is how it comes back after a wake,
-// and at every opening and closing of the sheet.
+static bool live_mode;
+static bool live_transport_hidden;
+static bool live_custom_nav;
+static bool connecting_shown;
+static bool audiobook_mode;
+static bool podcast_mode;
+static bool audiobook_has_chapters;
+static int audiobook_skip_shown_back;
+static int audiobook_skip_shown_forward;
+static bool audiobook_mode_valid;
+
+// Artwork loader tracking
+static bool cover_request_outstanding;
+static uint64_t cover_shown_id;
+static uint64_t cover_incoming_id;
+static enum {
+	COVER_ID_IDLE,
+	COVER_ID_NEW_TRACK,
+	COVER_ID_MEASURE,
+} cover_id_state;
+static char cover_shown_path[512];
+static void (*cover_release_cb)(void);
+
+extern const uint8_t player_sleeve_pixels[];
+static const lv_image_dsc_t player_sleeve = {
+	.header = {.magic = LV_IMAGE_HEADER_MAGIC, .cf = LV_COLOR_FORMAT_RGB565, .w = 480, .h = 480, .stride = 960},
+	.data_size = 480 * 480 * 2,
+	.data = player_sleeve_pixels,
+};
+
+#define MAX_PLAYER_STATE_CBS 8
+static player_state_cb_t state_cbs[MAX_PLAYER_STATE_CBS];
+static int state_cb_count;
+
+// Forward declarations
+static void notify_state_cbs(void);
+static void cover_poll_start(void);
+static void refresh_now_playing(void);
+static void update_progress(void);
+static void update_fav_button(void);
+static void update_transport_modes(void);
+static void update_speed_button(void);
+static void update_format_label(const device_state_t *state);
+static void update_queue_and_shortcuts(void);
+static void apply_palette_to_widgets(void);
+static void recompute_palette(bool animate);
+static void carousel_sync_adjacent_requests(void);
+static void carousel_layout_slots(void);
+static void carousel_animate_from(int32_t start_offset);
+static void wave_paint(int played_px);
+static void wave_refresh(const char *path, double position);
+static void lyrics_set_mode(lyrics_view_state_t mode, bool animate);
+static void lyrics_apply_line_styles(void);
+static void lyrics_follow(double seconds);
+static void lyrics_request(const device_state_t *state);
+static void lyrics_search_start(void);
+static void bar_over_player_update(void);
+static void update_fs_thumb(void);
+
+// ---------------------------------------------------------------------------
+// Utility Helpers
+// ---------------------------------------------------------------------------
+
+static bool motion_enabled(void) {
+	return !theme_reduced_motion() && sheet_open && power_screen_is_on();
+}
+
+static void set_label_text_if_changed(lv_obj_t *label, const char *text) {
+	if (!label || !text) {
+		return;
+	}
+	if (strcmp(lv_label_get_text(label), text) != 0) {
+		lv_label_set_text(label, text);
+	}
+}
+
+static void style_clean_box(lv_obj_t *obj) {
+	lv_obj_remove_style_all(obj);
+	lv_obj_set_scrollable(obj, false);
+	lv_obj_set_clickable(obj, false);
+}
+
 static void smooth_timer_sync(void) {
 	if (!smooth_timer) {
 		return;
 	}
-	if (progress_running && sheet_open && power_screen_is_on()) {
+	if (progress_running && sheet_open && power_screen_is_on() && !slider_dragging) {
 		lv_timer_resume(smooth_timer);
 	} else {
 		lv_timer_pause(smooth_timer);
 	}
 }
 
-// How often the UI reconciles itself against the playback thread. It polls
-// slowly rather than not at all while stopped: the audio thread can report
-// STOPPED for a moment in the middle of a track change, and a UI that stopped
-// polling on that reading would stay frozen until the next touch.
-#define POLL_PERIOD_PLAYING_MS 500
-#define POLL_PERIOD_IDLE_MS 2000
+static void compute_geometry(const gui_config_t *cfg) {
+	screen_w = (int)cfg->screen_width;
+	screen_h = (int)cfg->screen_height;
+	bar_height = (int)cfg->top_bar_height;
+	is_tall_panel = (screen_h >= 780);
 
-// How far past their 56 px the buttons at the two ends of the transport row
-// take a tap. Upwards and downwards the 84 px row still clips it; sideways the
-// previous and next buttons start about 50 px further in, so 20 reaches
-// neither.
-#define CORNER_BTN_EXT_CLICK 20
-
-// How often the progress display is carried forward between polls.
-//
-// The poll asks the playback thread where it is, and half a second is as often
-// as that is worth asking. But half a second is also how long the bar and the
-// shape of the track stood still before jumping, and a bar that moves twice a
-// second reads as a bar that is broken.
-//
-// So the position between polls is worked out from the clock instead of being
-// asked for -- playback runs in real time, so the arithmetic is exact -- and
-// the drawing happens only when it would actually differ by a pixel. On a
-// four-minute track that is about twice a second for each of the two, out of
-// sixteen chances; the rest of the ticks cost a subtraction and a comparison.
-#define SMOOTH_PERIOD_MS 60
-
-// How many fast polls to keep running after playback stops, so the queue gets
-// its chance to start the next track before the timer relaxes.
-#define POLLS_FAST_AFTER_STOP 4
-
-static int polls_since_stop = POLLS_FAST_AFTER_STOP;
-
-// Height the controls block needs for its two lines of text, the bar, the
-// clocks and the buttons. Only used as a floor on screens too short to fit a
-// full-width square cover on top of it.
-#define PLAYER_MENU_MIN_HEIGHT 210
-
-// The controls block as the R3 Pro II has it, 720 - 480. A taller panel (the
-// R1's 800) spreads what it has over the rows rather than leaving it empty
-// above and below them: a fifth to each end and a fifth to each of the three
-// gaps between the four rows.
-#define PLAYER_MENU_REF_HEIGHT 240
-#define PLAYER_MENU_PAD_VER 10
-#define PLAYER_MENU_GAP 12
-
-// Studio keeps only the bar, the clocks and the transport in the controls
-// block, pushed to the bottom, with the gaps between them the standard
-// arrangement has; the panel with the sleeve takes the rest of the screen
-// above them. This is their height at PLAYER_MENU_GAP; a taller panel adds
-// what its wider gaps take.
-#define STUDIO_CONTROLS_H 172
-
-// Album art: an image on top of a placeholder panel. The panel is always
-// there, so the layout doesn't jump between a track that has a cover and one
-// that doesn't -- the image is simply hidden in the latter case.
-static lv_obj_t *cover_panel;
-static lv_obj_t *cover_img;
-static lv_obj_t *cover_placeholder_icon;
-
-// Live mode (internet radio). A stream is not a track: it cannot be paused,
-// skipped or seeked, and it has no position and no length. Rather than leave
-// controls on screen that would do nothing, the ones that make no sense are
-// hidden and the play button becomes a stop button. These are kept so
-// apply_live_mode() can reach them.
-static lv_obj_t *prev_btn_obj;
-static lv_obj_t *next_btn_obj;
-static lv_obj_t *more_btn_obj;
-static lv_obj_t *more_btn_icon; // ellipsis on a track, chapters on a book
-static lv_obj_t *repeat_btn_obj;
-static lv_obj_t *speed_btn_obj;	 // stands in the repeat button's place on a book
-static lv_obj_t *speed_btn_icon;
-static lv_obj_t *below_slider_obj; // the two clocks under the bar
-// How far the four source marks keep from the corner of the artwork they
-// share. One number, because they replace each other in that corner and a
-// difference between them would read as the mark jumping.
-#define BADGE_INSET 14
-
-// Where the marks sit over the artwork: in its corner, under the status bar
-// when the bar stays up.
-static int badge_top(void) { return BADGE_INSET + (bar_always ? bar_height : 0); }
-
-static lv_obj_t *live_badge;	   // live indicator, top right over the artwork
-static lv_obj_t *qobuz_badge;	   // the Qobuz mark, in the same corner
-static lv_obj_t *tidal_badge;	   // and the Tidal one, over it: only one ever shows
-static lv_obj_t *podcast_badge;	   // and the podcast one, third in the same place
-static bool live_mode;
-static bool live_transport_hidden; // prev/next taken away on a stream
-static bool live_custom_nav;	   // on a station from a list, where they change station
-
-// Audiobook mode. A book is one long file, not a queue of songs: previous and
-// next have nothing to move to, and what a listener wants from those two
-// buttons is to go back ten seconds because they missed a sentence. So the
-// transport becomes a pair of ten-second jumps, the overflow menu becomes the
-// chapter list, and the star and the repeat mode -- both of which belong to
-// the music library and its queue -- go away rather than sit there doing
-// something invisible to a book.
-static bool audiobook_mode;
-// A podcast is not an audiobook, but the two skip buttons are the same. See
-// apply_audiobook_mode(): the rest of the book dressing -- chapters, speed,
-// book icon -- stays with books only.
-static bool podcast_mode;
-static bool audiobook_has_chapters;		 // whether the loaded book is marked up
-static int audiobook_skip_shown_back;	 // the two jump sizes the buttons are drawn
-static int audiobook_skip_shown_forward; // for, so changing the setting repaints
-static bool audiobook_mode_valid;   // false until the first apply, so it paints once
-
-static cover_image_t current_cover;	   // pixels currently referenced by cover_img
-static cover_image_t current_backdrop; // upside-down blurred copy behind the controls
-static int cover_box_w, cover_box_h;   // the artwork spans the full screen width
-
-// ---------------------------------------------------------------------------
-// The two arrangements
-//
-// Standard is sleeve on top, and under it a block with the title, the star, the
-// format, a bar and the transport.
-//
-// Alternative moves the track's own things onto the sleeve -- the title and
-// artist in a pill in one bottom corner, the star in a disc in the other -- and
-// turns the progress bar into the shape of the track. Everything it draws takes
-// its colour from the sleeve rather than from the theme, which is why it only
-// looks like anything at all over artwork.
-//
-// One set of widgets, moved between parents, and not two pages: the title, the
-// star and the transport all have behaviour behind them, and a second copy of
-// each would be a second place for that behaviour to be wrong.
-// ---------------------------------------------------------------------------
-
-// The progress bar: a thin track, and a knob that is a white ring around a
-// smaller circle of the accent colour. The ring is a wide white border over an
-// accent-coloured body rather than a second object, so it costs nothing and
-// follows the knob on its own.
-#define PROGRESS_TRACK_HEIGHT 10 // as thick as every other slider
-#define PROGRESS_KNOB_GROW 9	 // how far the knob grows past the track
-#define PROGRESS_KNOB_RING 5
-
-// How the shape of the track is drawn, and how much room it gets. The bars are
-// wide and well apart with rounded ends rather than a comb of hairlines: at
-// this size a hairline is one pixel of a colour that is half background, and
-// the whole thing reads as noise.
-#define WAVE_HEIGHT 64
-#define WAVE_BAR_GAP 3
-#define WAVE_MIN_BAR 3	  // a silent column is still a mark, not a hole
-#define WAVE_PAST_OPA 255 // the part already played
-#define WAVE_TODO_OPA 80  // and the part still to come
-
-// How far the pills and the disc sit in from the corner of the sleeve, and how
-// big the disc is.
-#define ALT_PAD 16
-#define ALT_FAV_SIZE 64
-#define ALT_PILL_PAD_H 18 // what a pill keeps to the left and right of its text
-#define ALT_PILL_PAD_V 8
-// How far past its own edges a transport button takes a press in this
-// arrangement: into the gaps between them. The star takes the whole of its disc
-// instead (apply_layout()).
-#define ALT_EXT_CLICK 14
-#define FAV_BTN_W 48
-#define FAV_BTN_H 44
-
-// What the sleeve's colour becomes once it has to be painted rather than
-// thrown.
-//
-// album_tone is stretched to full strength (cover_tone_stretched), the way
-// cover_dominant_tone() answers for Cover Flow, where it is a light behind the
-// record and a light that is not strong is not seen. Poured into a solid pill the same number is a poster
-// colour -- which is the complaint. So the hue is kept and everything else is
-// pinned: the surface keeps a third of its distance from grey and sits at a
-// fixed low brightness, the ink on it is always the same white, and the mark
-// the waveform draws keeps rather more colour and a fixed high brightness so it
-// still reads over a dark blurred sleeve. Two roles, one hue -- every album
-// then looks like the same player rather than like a different skin.
-#define ALT_SURFACE_SAT 34	// per cent of the distance from grey kept
-#define ALT_SURFACE_LUMA 58 // and where it sits on 0..255
-#define ALT_MARK_SAT 72
-#define ALT_MARK_LUMA 196
-
-// The setting, and whether it is in force right now.
-//
-// They are two different things because the alternative arrangement is built
-// around a file on the card: the shape of the track comes from decoding it, the
-// colour from its sleeve, and the pill in the corner from tags. A radio station
-// has no length to draw, a stream from a phone has no file to read ahead of,
-// and a Qobuz track is a cache entry that will be gone tomorrow. So the setting
-// says what the user wants for their music, and `layout_alt_now` says whether
-// what is playing is music of that kind. Everything that draws asks the second.
-static player_layout_t layout_choice; // the setting, saved in the config
-static bool layout_alt_now;		// and whether the current source can use it
-static bool layout_studio_now;	// likewise for the third arrangement
-// The shape of the track and the sleeve's colour: up with the alternative
-// layout, and kept when the words are shown over it.
-static bool layout_wave_now;
-
-static uint32_t album_tone; // the sleeve's colour, 0 when there is no sleeve
-// The setting that has the Standard and Studio arrangements wear the sleeve's
-// colour as their accent too, as Waveform always does.
-static bool cover_accent;
-
-static lv_obj_t *song_text_obj; // the title and artist, wherever they live now
-static lv_obj_t *song_side_obj; // the star and the format, likewise
-static void align_title_with_star(void);
-static lv_obj_t *alt_text_col;	// the two pills, stacked at the foot of the sleeve
-static lv_obj_t *alt_title_pill;
-static lv_obj_t *alt_artist_pill;
-static lv_obj_t *alt_fav_circle;
-static lv_obj_t *wave_box;
-static lv_obj_t *wave_canvas;
-static uint8_t *wave_buf;
-static int wave_w; // the buffer's width, which is what the painting must use
-static uint8_t wave_bars[WAVEFORM_BARS];
-// How many columns of this track's shape are known, from the left: all of them
-// once it has been worked out, fewer while the worker is still reading the
-// file, and the rest are drawn flat until they arrive.
-static int wave_ready;
-static int wave_drawn = -1; // where the playhead was, in pixels, when it was drawn
-static uint32_t wave_drawn_tone = 1;
-static int backdrop_w, backdrop_h;	   // size of the controls block it sits behind
-// Studio shows the same blurred copy behind the whole screen, so there it is
-// asked for at that shape instead: a picture made for the block behind the
-// controls is a third of the height and stretching it up is both distorted and
-// coarse. `backdrop_is_studio` is the shape the picture on hand was made at.
-static int backdrop_studio_h;
-static bool backdrop_is_studio;
-
-static double current_total_length = 0; // cached from the last device_state snapshot, so slider math works between polls
-static char progress_label_text[32];
-
-// The stretch of the file the progress bar and its two clocks stand for. The
-// whole file, except on a book with chapters when Audiobooks -> Show duration
-// is set to the chapter: then only the chapter being listened to, so the bar
-// starts empty at every chapter and the right clock is the chapter's length.
-// `view_length` is 0 while the length of the file is not known.
-static double view_start;
-static double view_length;
-
-// True while the controls sit on a loaded cover's dark backdrop. The play
-// button wears its white disc there (it has to stand out against artwork);
-// on the plain no-cover panel it is flat, like prev and next.
-static bool chrome_over_cover;
-
-// While a station connects, stop, previous and next are greyed out and do
-// nothing: the connection is on its way, and pulling it down or starting the
-// next one in the middle of it is a tap that only makes the wait longer. The
-// side keys and the control centre ask radio_is_connecting() themselves.
-static bool connecting_shown;
-
-static void apply_connecting(void) {
-	bool connecting = radio_is_connecting();
-	if (connecting == connecting_shown) {
-		return;
+	// 72 bars * 6 px pitch - 2 px gap = 430 px exact integer grid on 480 px panel.
+	content_w = WAVEFORM_BARS * WAVE_BAR_PITCH - WAVE_BAR_GAP;
+	if (content_w > screen_w - 32) {
+		content_w = screen_w - 32;
 	}
-	connecting_shown = connecting;
-	lv_obj_t *const buttons[] = {play_btn, prev_btn_obj, next_btn_obj};
-	for (size_t i = 0; i < sizeof(buttons) / sizeof(buttons[0]); i++) {
-		if (!buttons[i]) {
-			continue;
+	side_margin = (screen_w - content_w) / 2;
+
+	int top_offset = bar_always ? (bar_height - 8) : 4;
+	if (top_offset < 4) {
+		top_offset = 4;
+	}
+	header_y = top_offset;
+	header_h = 40;
+	stage_y = header_y + header_h + 2;
+
+	if (is_tall_panel) {
+		// HiBy R1 (480 x 800):
+		//   Header ~36..76, Stage ~78..508 (430 px), Track Info ~514..592,
+		//   Waveform+Meta ~596..662, Controls ~666..744, Shortcuts ~748..796.
+		int bottom_reserved = bar_always ? 290 : 298;
+		stage_h = screen_h - stage_y - bottom_reserved;
+		if (stage_h > content_w) {
+			stage_h = content_w;
 		}
-		if (connecting) {
-			lv_obj_add_state(buttons[i], LV_STATE_DISABLED);
-		} else {
-			lv_obj_remove_state(buttons[i], LV_STATE_DISABLED);
+		if (stage_h < 320) {
+			stage_h = 320;
 		}
+		hero_box = stage_h < content_w ? stage_h : content_w;
+		peek_box = hero_box * 80 / 100;
+		wave_h = 34;
+	} else {
+		// HiBy R3 Pro II (480 x 720):
+		int bottom_reserved = 272;
+		stage_h = screen_h - stage_y - bottom_reserved;
+		if (stage_h > 360) {
+			stage_h = 360;
+		}
+		if (stage_h < 260) {
+			stage_h = 260;
+		}
+		hero_box = stage_h;
+		peek_box = hero_box * 80 / 100;
+		wave_h = 30;
 	}
 }
 
-// Switches the transport between a track and a live stream. Cheap and
-// idempotent: called from every now-playing refresh, and does nothing at all
-// unless the mode actually changed.
-static void apply_live_mode(bool live) {
-	// Previous and next go away on a stream, playing or stopped: they would
-	// start a local track in place of the station. On a station started from a
-	// list -- radio.txt, a country, a search, the starred -- they stay and move
-	// along that list, and the bearing under the bar says where in it the
-	// station is (see update_queue_position()).
-	bool custom_nav = live && radio_can_step();
-	bool transport_hidden = live && !custom_nav;
+// ---------------------------------------------------------------------------
+// Adaptive & Fixed Ambient Palette Engine Integration
+// ---------------------------------------------------------------------------
 
-	if (live == live_mode && transport_hidden == live_transport_hidden && custom_nav == live_custom_nav &&
-		cover_placeholder_icon) {
-		return;
-	}
-	live_mode = live;
-	live_transport_hidden = transport_hidden;
-	live_custom_nav = custom_nav;
-
-	// A stream has no queue to look at, no length to scrub and no repeat mode
-	// that means anything.
-	//
-	// Repeat/shuffle goes for a reason worth stating: it is not merely useless
-	// on a stream, it is misleading. The mode it cycles belongs to the track
-	// queue, so a tap there would silently change what happens to the music
-	// the radio interrupted.
-	lv_obj_t *const hidden_when_live[] = {more_btn_obj, repeat_btn_obj, progress_slider, elapsed_label,
-										  remaining_label};
-	for (size_t i = 0; i < sizeof(hidden_when_live) / sizeof(hidden_when_live[0]); i++) {
-		if (!hidden_when_live[i]) {
-			continue;
-		}
-		if (live) {
-			lv_obj_set_hidden(hidden_when_live[i], true);
-		} else {
-			lv_obj_set_hidden(hidden_when_live[i], false);
-		}
-	}
-	// The row under the bar stays for a station from a list, for its place in
-	// the list and nothing else.
-	if (below_slider_obj) {
-		if (live && !custom_nav) {
-			lv_obj_set_hidden(below_slider_obj, true);
-		} else {
-			lv_obj_set_hidden(below_slider_obj, false);
-		}
-	}
-
-	// The shape of the track goes with the bar, and comes back only if the
-	// alternative layout is the one up -- it is not in the list above because
-	// that list has no idea which arrangement is on screen, and unhiding it in
-	// the standard one would leave an empty strip under the title.
-	if (wave_box) {
-		if (live || !layout_wave_now) {
-			lv_obj_set_hidden(wave_box, true);
-		} else {
-			lv_obj_set_hidden(wave_box, false);
-		}
-	}
-
-	lv_obj_t *const transport[] = {prev_btn_obj, next_btn_obj};
-	for (size_t i = 0; i < sizeof(transport) / sizeof(transport[0]); i++) {
-		if (!transport[i]) {
-			continue;
-		}
-		if (transport_hidden) {
-			lv_obj_set_hidden(transport[i], true);
-		} else {
-			lv_obj_set_hidden(transport[i], false);
-		}
-	}
-
-	if (live_badge) {
-		if (live) {
-			lv_obj_set_hidden(live_badge, false);
-			lv_obj_move_foreground(live_badge);
-		} else {
-			lv_obj_set_hidden(live_badge, true);
-		}
-	}
-	// The marks share one corner and can never go there together: a live
-	// stream does not come from Qobuz.
-	if (tidal_badge && live) {
-		lv_obj_set_hidden(tidal_badge, true);
-	}
-	if (podcast_badge && live) {
-		lv_obj_set_hidden(podcast_badge, true);
-	}
-	if (qobuz_badge && live) {
-		lv_obj_set_hidden(qobuz_badge, true);
-	}
-
-	// A note means "track", a book means a book, and a station with no artwork
-	// gets the radio. Coming back off a stream has to restore whichever of the
-	// first two is right, not assume the note.
-	if (cover_placeholder_icon) {
-		lv_image_set_src(cover_placeholder_icon, live ? &icon_radio_player
-									: (audiobook_mode ? &icon_book_headphones : &icon_music_note));
-	}
+lv_color_t player_active_accent(void) {
+	return pal_cur.accent;
 }
 
-// Dresses the player for a book or for a track. Cheap and idempotent, like
-// apply_live_mode(): called from every now-playing refresh and from the poll,
-// and does nothing at all unless the answer changed.
-static void apply_audiobook_mode(bool book, bool podcast) {
-	// Whether this book is marked up decides what the chapter button does, not
-	// whether it is there. A folder book's files are its chapters.
-	bool chapters = book && (audiobook_chapter_count() > 0 || audiobook_part_count() > 1);
-
-	// Books and podcasts both get the second-jump buttons, but not the same
-	// pair of sizes: a book's forward jump steps over a pause, a podcast's
-	// over a half-minute sponsor read. They are two separate settings on two
-	// separate pages (podcast settings, and Audiobooks -> change controls).
-	//
-	// Speed carries over too, as a setting of its own. Nothing else does: a
-	// podcast has no chapters, is not a single file, and sits in a real queue
-	// of episodes. Chapters and the book icon stay with books.
-	bool skips = book || podcast;
-	int back = podcast && !book ? podcast_skip_back() : audiobook_skip_back();
-	int forward = podcast && !book ? podcast_skip_forward() : audiobook_skip_forward();
-
-	if (audiobook_mode_valid && book == audiobook_mode && podcast == podcast_mode &&
-		chapters == audiobook_has_chapters && back == audiobook_skip_shown_back &&
-		forward == audiobook_skip_shown_forward) {
+static void compute_target_palette(ambient_palette_t *out) {
+	if (adaptive_accent && current_has_cover && current_raw_tone != 0) {
+		ambient_palette_adaptive(true, current_raw_tone, current_mean_luma, out);
 		return;
 	}
-	audiobook_mode = book;
-	podcast_mode = podcast;
-	audiobook_has_chapters = chapters;
-	audiobook_skip_shown_back = back;
-	audiobook_skip_shown_forward = forward;
-	audiobook_mode_valid = true;
+	int idx = theme_get_accent();
+	uint32_t preset_rgb = 0;
+	if (idx > 0) {
+		lv_color_t c = theme_accent_preset(idx);
+		preset_rgb = ((uint32_t)c.red << 16) | ((uint32_t)c.green << 8) | c.blue;
+	}
+	ambient_palette_fixed(idx, preset_rgb, out);
+}
 
-	if (prev_icon) {
-		lv_image_set_src(prev_icon, !skips                            ? &icon_skip_back
-									: back == AUDIOBOOK_SKIP_HUGE ? &icon_prev_60
-									: back == AUDIOBOOK_SKIP_LONG ? &icon_prev_30
-																  : &icon_prev_10);
+static void apply_palette_to_widgets(void) {
+	if (!player_screen) {
+		return;
 	}
-	if (next_icon) {
-		lv_image_set_src(next_icon, !skips                               ? &icon_skip_forward
-									: forward == AUDIOBOOK_SKIP_HUGE ? &icon_next_60
-									: forward == AUDIOBOOK_SKIP_LONG ? &icon_next_30
-																	 : &icon_next_10);
+
+	// Main screen & Mode B Full-screen share the same album-derived dark vertical gradient.
+	lv_obj_t *canvases[] = {player_screen, fullscreen_lyrics_box};
+	for (size_t i = 0; i < sizeof(canvases) / sizeof(canvases[0]); i++) {
+		if (!canvases[i]) {
+			continue;
+		}
+		lv_obj_set_style_bg_color(canvases[i], pal_cur.bg_top, 0);
+		lv_obj_set_style_bg_grad_color(canvases[i], pal_cur.bg_bottom, 0);
+		lv_obj_set_style_bg_grad_dir(canvases[i], LV_GRAD_DIR_VER, 0);
+		lv_obj_set_style_bg_opa(canvases[i], LV_OPA_COVER, 0);
 	}
-	// A book has a menu of its own behind the usual glyph: chapters,
-	// bookmarks, summary. On a podcast the same button goes straight to the
-	// episodes, the only thing wanted from it, rather than to a menu whose one
-	// useful entry would always be picked.
+
+	if (header_title_label) {
+		lv_obj_set_style_text_color(header_title_label, pal_cur.text_secondary, 0);
+	}
 	if (more_btn_icon) {
-		lv_image_set_src(more_btn_icon, podcast && !book ? &icon_podcast_episodes : &icon_ellipsis_vertical);
+		lv_obj_set_style_image_recolor(more_btn_icon, pal_cur.text_primary, 0);
+		lv_obj_set_style_image_recolor_opa(more_btn_icon, LV_OPA_80, 0);
 	}
 
-	// The star and the repeat mode are about the music library and its queue.
-	// On a book they are not merely useless: starring would write a row into
-	// the music favourites for a file the music library does not index, and
-	// the repeat mode would silently change what happens to the queue the book
-	// interrupted.
-	//
-	// On a podcast the star stays but means something else: it follows the
-	// podcast, putting it under the subscribed feeds -- the same promise the
-	// star makes everywhere, "find this again without searching". Repeat still
-	// goes: a queue of episodes is not an album, and looping the last twenty
-	// instalments is nothing anybody asks for.
-	if (fav_btn_obj) {
-		if (book) {
-			lv_obj_set_hidden(fav_btn_obj, true);
-		} else {
-			lv_obj_set_hidden(fav_btn_obj, false);
+	for (int i = 0; i < 3; i++) {
+		if (cslots[i].frame) {
+			lv_obj_set_style_bg_color(cslots[i].frame, pal_cur.surface, 0);
 		}
-	}
-	if (repeat_btn_obj) {
-		if (book || podcast) {
-			lv_obj_set_hidden(repeat_btn_obj, true);
-		} else {
-			lv_obj_set_hidden(repeat_btn_obj, false);
+		if (cslots[i].placeholder && lv_image_get_src(cslots[i].placeholder) != &player_sleeve) {
+			lv_obj_set_style_image_recolor(cslots[i].placeholder, pal_cur.text_secondary, 0);
 		}
 	}
 
-	if (speed_btn_obj) {
-		if (book || podcast) {
-			lv_obj_set_hidden(speed_btn_obj, false);
-			update_speed_button();
-		} else {
-			lv_obj_set_hidden(speed_btn_obj, true);
+	if (drag_caption_pill) {
+		lv_obj_set_style_bg_color(drag_caption_pill, pal_cur.surface, 0);
+		lv_obj_set_style_border_color(drag_caption_pill, pal_cur.border, 0);
+	}
+	if (drag_caption_label) {
+		lv_obj_set_style_text_color(drag_caption_label, pal_cur.text_primary, 0);
+	}
+
+	if (song_title_label) {
+		lv_obj_set_style_text_color(song_title_label, pal_cur.text_primary, 0);
+	}
+	if (song_artist_label) {
+		lv_obj_set_style_text_color(song_artist_label, pal_cur.text_secondary, 0);
+	}
+	if (elapsed_label) {
+		lv_obj_set_style_text_color(elapsed_label, pal_cur.text_secondary, 0);
+	}
+	if (format_label) {
+		lv_obj_set_style_text_color(format_label, pal_cur.text_secondary, 0);
+	}
+	if (remaining_label) {
+		lv_obj_set_style_text_color(remaining_label, pal_cur.text_secondary, 0);
+	}
+
+	// Conventional fallback seek bar & Mode B compact seek bar
+	lv_obj_t *sliders[] = {progress_slider, fs_slider};
+	for (size_t i = 0; i < sizeof(sliders) / sizeof(sliders[0]); i++) {
+		if (!sliders[i]) {
+			continue;
+		}
+		lv_obj_set_style_bg_color(sliders[i], pal_cur.wave_unplayed, LV_PART_MAIN);
+		lv_obj_set_style_bg_color(sliders[i], pal_cur.accent, LV_PART_INDICATOR);
+		lv_obj_set_style_bg_color(sliders[i], pal_cur.accent, LV_PART_KNOB);
+	}
+
+	// Transport
+	if (play_btn) {
+		lv_obj_set_style_bg_color(play_btn, pal_cur.accent, 0);
+		lv_obj_set_style_bg_color(play_btn, pal_cur.accent_pressed, LV_STATE_PRESSED);
+	}
+	if (play_btn_icon) {
+		lv_obj_set_style_image_recolor(play_btn_icon, pal_cur.accent_ink, 0);
+		lv_obj_set_style_image_recolor_opa(play_btn_icon, LV_OPA_COVER, 0);
+	}
+	if (fs_play_btn) {
+		lv_obj_set_style_bg_color(fs_play_btn, pal_cur.accent, 0);
+		lv_obj_set_style_bg_color(fs_play_btn, pal_cur.accent_pressed, LV_STATE_PRESSED);
+	}
+	if (fs_play_icon) {
+		lv_obj_set_style_image_recolor(fs_play_icon, pal_cur.accent_ink, 0);
+		lv_obj_set_style_image_recolor_opa(fs_play_icon, LV_OPA_COVER, 0);
+	}
+
+	lv_obj_t *primary_icons[] = {prev_icon, next_icon, fs_prev_icon, fs_next_icon};
+	for (size_t i = 0; i < sizeof(primary_icons) / sizeof(primary_icons[0]); i++) {
+		if (primary_icons[i]) {
+			lv_obj_set_style_image_recolor(primary_icons[i], pal_cur.text_primary, 0);
+			lv_obj_set_style_image_recolor_opa(primary_icons[i], LV_OPA_COVER, 0);
 		}
 	}
 
-	// A book with no artwork gets the book and an episode the microphone, not
-	// a musical note -- each the glyph its own page uses, drawn at the size
-	// this one is, which is why the podcast row's 40 px copy is not the one
-	// named here. Only touched when a station is not up: live mode owns this
-	// icon while it is on.
-	if (cover_placeholder_icon && !live_mode) {
-		const lv_image_dsc_t *mark = book ? &icon_book_headphones : podcast ? &icon_podcast_cover : &icon_music_note;
-		lv_image_set_src(cover_placeholder_icon, mark);
+	update_transport_modes();
+	update_speed_button();
+	update_fav_button();
+	update_queue_and_shortcuts();
+
+	// Lyrics chrome
+	if (integrated_lyrics_box) {
+		lv_obj_set_style_bg_color(integrated_lyrics_box, pal_cur.surface, 0);
+		lv_obj_set_style_border_color(integrated_lyrics_box, pal_cur.border, 0);
 	}
+	lv_obj_t *lyr_icons[] = {int_lyrics_search_icon, int_lyrics_expand_icon, fs_size_icon, fs_close_icon,
+							 fs_offset_search_icon};
+	for (size_t i = 0; i < sizeof(lyr_icons) / sizeof(lyr_icons[0]); i++) {
+		if (lyr_icons[i]) {
+			lv_obj_set_style_image_recolor(lyr_icons[i], pal_cur.text_primary, 0);
+			lv_obj_set_style_image_recolor_opa(lyr_icons[i], LV_OPA_80, 0);
+		}
+	}
+	if (fs_thumb_box) {
+		lv_obj_set_style_bg_color(fs_thumb_box, pal_cur.surface, 0);
+	}
+	if (fs_thumb_fallback) {
+		lv_obj_set_style_image_recolor(fs_thumb_fallback, pal_cur.text_secondary, 0);
+	}
+	if (fs_title_label) {
+		lv_obj_set_style_text_color(fs_title_label, pal_cur.text_primary, 0);
+	}
+	if (fs_artist_label) {
+		lv_obj_set_style_text_color(fs_artist_label, pal_cur.text_secondary, 0);
+	}
+	if (fs_elapsed_label) {
+		lv_obj_set_style_text_color(fs_elapsed_label, pal_cur.text_secondary, 0);
+	}
+	if (fs_duration_label) {
+		lv_obj_set_style_text_color(fs_duration_label, pal_cur.text_secondary, 0);
+	}
+	if (fs_offset_toggle_label) {
+		lv_obj_set_style_text_color(fs_offset_toggle_label,
+									(fs_offset_bar_open || lyrics_offset_ms != 0) ? pal_cur.accent
+																				  : pal_cur.text_primary,
+									0);
+	}
+	if (fs_offset_bar) {
+		lv_obj_set_style_bg_color(fs_offset_bar, pal_cur.surface, 0);
+		lv_obj_set_style_border_color(fs_offset_bar, pal_cur.border, 0);
+	}
+	if (fs_offset_value_label) {
+		lv_obj_set_style_text_color(fs_offset_value_label,
+									lyrics_offset_ms != 0 ? pal_cur.accent : pal_cur.text_primary, 0);
+	}
+	if (resume_sync_btn) {
+		lv_obj_set_style_bg_color(resume_sync_btn, pal_cur.surface_pressed, 0);
+		lv_obj_set_style_border_color(resume_sync_btn, pal_cur.accent, 0);
+	}
+	if (resume_sync_label) {
+		lv_obj_set_style_text_color(resume_sync_label, pal_cur.text_primary, 0);
+	}
+	if (lyrics_empty_icon) {
+		lv_obj_set_style_image_recolor(lyrics_empty_icon, pal_cur.text_secondary, 0);
+		lv_obj_set_style_image_recolor_opa(lyrics_empty_icon, LV_OPA_60, 0);
+	}
+	if (lyrics_empty_label) {
+		lv_obj_set_style_text_color(lyrics_empty_label, pal_cur.text_secondary, 0);
+	}
+	if (lyrics_empty_search_btn) {
+		lv_obj_set_style_bg_color(lyrics_empty_search_btn, pal_cur.surface_pressed, 0);
+		lv_obj_set_style_border_color(lyrics_empty_search_btn, pal_cur.border, 0);
+	}
+	if (lyrics_empty_search_label) {
+		lv_obj_set_style_text_color(lyrics_empty_search_label, pal_cur.accent, 0);
+	}
+
+	lyrics_apply_line_styles();
+
+	// Force waveform redraw with new accent/unplayed colours
+	wave_drawn_sig = 0;
+	if (wave_ready > 0 && wave_canvas && !lv_obj_is_hidden(wave_canvas)) {
+		wave_paint(wave_drawn_px >= 0 ? wave_drawn_px : 0);
+	}
+}
+
+static void palette_anim_exec_cb(void *var, int32_t v) {
+	(void)var;
+	ambient_palette_lerp(&pal_from, &pal_target, (int)v, &pal_cur);
+	apply_palette_to_widgets();
+}
+
+static void recompute_palette(bool animate) {
+	ambient_palette_t next_pal;
+	compute_target_palette(&next_pal);
+
+	lv_anim_delete(&pal_anim_tag, palette_anim_exec_cb);
+
+	if (!animate || !motion_enabled()) {
+		pal_cur = next_pal;
+		pal_target = next_pal;
+		apply_palette_to_widgets();
+		return;
+	}
+
+	pal_from = pal_cur;
+	pal_target = next_pal;
+	lv_anim_t a;
+	lv_anim_init(&a);
+	lv_anim_set_var(&a, &pal_anim_tag);
+	lv_anim_set_exec_cb(&a, palette_anim_exec_cb);
+	lv_anim_set_values(&a, 0, 1000);
+	lv_anim_set_duration(&a, PALETTE_TRANSITION_MS);
+	lv_anim_set_path_cb(&a, lv_anim_path_ease_out);
+	lv_anim_start(&a);
 }
 
 // ---------------------------------------------------------------------------
-// Stopping on its own: at the end of a chapter, or after a while
-//
-// Both live here, in the poll that already runs twice a second, because both
-// are questions about where playback has got to -- and neither wants a timer
-// of its own that could fire while the book is paused, or after it has been
-// swapped for a song.
+// Source Mode Helpers (Local, Radio, Audiobook, Podcast)
 // ---------------------------------------------------------------------------
 
-// Where the chapter being listened to ends, or 0 when the book has no chapters
-// or is on its last one. Worked out per poll rather than remembered, so a jump
-// to another chapter is picked up without anything having to be told.
-static double current_chapter_end(double position) {
-	int index = audiobook_chapter_at(position);
-	if (index < 0) {
-		return 0;
-	}
-	double start = 0;
-	if (!audiobook_chapter(index + 1, NULL, 0, &start)) {
-		return 0; // the last chapter ends where the file does
-	}
-	return start;
-}
-
-static void pause_book_at(double seconds) {
-	device_state_seek(seconds);
-	if (audio_get_status() == AUDIO_STATUS_PLAYING) {
-		audiobook_suppress_rewind_once();
-		device_state_toggle_play_pause();
-	}
-	// Written through: stopping on purpose is exactly the moment somebody puts
-	// the player down.
-	audiobook_note_position(seconds, 0, true);
-}
-
-// Runs on every poll while a book is loaded.
-//
-// Only the chapter boundary: the sleep timers live in sleeptimer.c, where all
-// three behave the same way.
-static bool audiobook_auto_stop(const device_state_t *state) {
-	if (state->status != AUDIO_STATUS_PLAYING || !audiobook_stop_at_chapter_end()) {
+static bool playing_local_file(const device_state_t *state) {
+	if (state->live || !state->current_file[0] || audiobook_is_playing()) {
 		return false;
 	}
-	double end = current_chapter_end(state->progress_current_secs);
-	if (end > 0 && state->progress_current_secs >= end - 0.5) {
-		pause_book_at(end);
-		return true;
+	airplay_state_t air;
+	airplay_get_state(&air);
+	if (air.playing) {
+		return false;
 	}
-	return false;
+	const char *f = state->current_file;
+	return !qobuzcache_owns(f) && !tidalcache_owns(f) && !podcastcache_is_episode(f) && !dlna_owns_path(f) &&
+		   !dlna_owns_playback();
 }
 
-// The jump both the on-screen buttons and the side keys make. Clamped at both
-// ends: asking for -10 s in the first second means the beginning, and running
-// off the end of the file would stop the book instead of moving in it.
-static void audiobook_seek_by(double delta, const device_state_t *state) {
-	double target = state->progress_current_secs + delta;
-	if (target < 0) {
-		target = 0;
-	}
-	double length = state->progress_total_secs > 0 ? state->progress_total_secs : current_total_length;
-	if (length > 1.0 && target > length - 1.0) {
-		target = length - 1.0;
-	}
-
-	device_state_seek(target);
-	// Written through immediately: a jump is a deliberate move, and the ten
-	// second throttle would lose it if the player were switched off next.
-	audiobook_note_position(target, length, true);
-}
-
-// Applies a playback status to the play/pause button and the progress timer.
-// Called both optimistically (right after a button press, before the audio
-// thread has caught up) and from update_progress() every poll, which is what
-// keeps the UI from going stale if the track stops on its own.
-// Which sleep timer, if any, owns what is playing.
-//
-// Books and podcasts have their own because they are listened to differently: a
-// stretch that is right for falling asleep to music is not the one somebody
-// chose for a chapter, and a podcast timer set at bedtime should not be counting
-// down over an album the next morning. Everything else the transport plays --
-// the card, Tidal, Qobuz -- is one thing and gets one timer.
-//
-// Three sources are none of them, and for the same reason: they do not go
-// through the player's transport at all. The radio, the Game Boy and the
-// Bluetooth receiver push their sound out through the external path, and there
-// is no pause to give them -- stopping a station is a disconnection, stopping
-// the emulator is stopping the game, and stopping the receiver is silence in a
-// room where somebody else's phone is still playing. Only the radio ever
-// reports playing here; the other two are written down so that it stays true if
-// they ever start to.
 static sleeptimer_kind_t sleeptimer_kind_playing(void) {
 	if (radio_is_active() || gearboy_running() || btreceiver_is_active()) {
 		return SLEEPTIMER_COUNT;
@@ -701,84 +738,1396 @@ static sleeptimer_kind_t sleeptimer_kind_playing(void) {
 	return SLEEPTIMER_MUSIC;
 }
 
-static void apply_playback_status(audio_status_t status) {
-	bool playing = (status == AUDIO_STATUS_PLAYING);
-
-	// The glyph is the accent colour, always: play and pause are the same
-	// control in two states. Only the disc under it changes (see
-	// set_over_cover): white over artwork and in the dark theme, dark in the
-	// light theme when there is no cover to stand out against.
-	//
-	// On a live stream there is no pause -- stopping and starting again does
-	// not resume, it reconnects -- so the button says stop while it is on.
-	// Stopped, it goes back to play: the station stays loaded, and pressing
-	// it opens a fresh connection to the same one.
-	lv_image_set_src(play_btn_icon,
-					 live_mode ? (playing ? &icon_stop : &icon_play) : (playing ? &icon_pause : &icon_play));
-	lv_obj_set_style_image_recolor(play_btn_icon, chrome_accent(), 0);
-	lv_obj_set_style_image_recolor_opa(play_btn_icon, LV_OPA_COVER, 0);
-
-	// Keep polling either way, just less often when nothing is playing. The
-	// timer must never be paused here: a track change is briefly reported as
-	// STOPPED, and a timer paused on that reading leaves nothing running to
-	// correct the progress bar and the play/pause icon.
-	//
-	// Dropping straight to the slow period on STOPPED is wrong too: the end of
-	// a track is reported as STOPPED and the queue only advances on the next
-	// poll, so the gap between two tracks would become the slow period, seconds
-	// of silence reading as a player that stopped instead of going on. Stay on
-	// the fast period for a moment after playback stops, which is exactly the
-	// window the handover needs.
-	if (playing) {
-		polls_since_stop = 0;
-	} else if (polls_since_stop < POLLS_FAST_AFTER_STOP) {
-		polls_since_stop++;
+static void refresh_cover_placeholders(void) {
+	const lv_image_dsc_t *art = &player_sleeve;
+	if (live_mode) {
+		art = &icon_radio_player;
+	} else if (audiobook_mode) {
+		art = &icon_book_headphones;
+	} else if (podcast_mode) {
+		art = &icon_podcast_cover;
 	}
+	bool is_sleeve = (art == &player_sleeve);
 
-	bool settling = polls_since_stop < POLLS_FAST_AFTER_STOP;
-	lv_timer_set_period(progress_slider_timer, (playing || settling) ? POLL_PERIOD_PLAYING_MS : POLL_PERIOD_IDLE_MS);
-	lv_timer_resume(progress_slider_timer);
-
-	// The status bar shows the same state, and told here rather than left to
-	// wait for its own five-second poll.
-	topbar_refresh_playback();
-
-	// Every route into and out of playing comes through here -- the button, the
-	// side keys, the end of a track, a remote, the poll putting the screen back
-	// in step with the engine -- so it is the one place the sleep timers can be
-	// told without being told twice. It is also the one place that knows what
-	// is playing well enough to say which of the three it belongs to.
-	sleeptimer_note_playing(playing ? sleeptimer_kind_playing() : SLEEPTIMER_COUNT);
-	if (sleep_timer) {
-		if (sleeptimer_any_running()) {
-			lv_timer_resume(sleep_timer);
+	for (int i = 0; i < 3; i++) {
+		lv_obj_t *ph = cslots[i].placeholder;
+		if (!ph) {
+			continue;
+		}
+		int box = (i == 1) ? hero_box : peek_box;
+		if (lv_image_get_src(ph) != art) {
+			lv_image_set_src(ph, art);
+		}
+		if (is_sleeve) {
+			lv_obj_set_size(ph, box, box);
+			lv_image_set_inner_align(ph, LV_IMAGE_ALIGN_COVER);
+			lv_obj_set_style_image_recolor_opa(ph, LV_OPA_TRANSP, 0);
 		} else {
-			lv_timer_pause(sleep_timer);
+			lv_obj_set_size(ph, LV_SIZE_CONTENT, LV_SIZE_CONTENT);
+			lv_image_set_inner_align(ph, LV_IMAGE_ALIGN_CENTER);
+			lv_obj_set_style_image_recolor(ph, pal_cur.text_secondary, 0);
+			lv_obj_set_style_image_recolor_opa(ph, LV_OPA_COVER, 0);
+		}
+		lv_obj_center(ph);
+	}
+}
+
+static void sync_header_title(void) {
+	if (!header_title_label) {
+		return;
+	}
+	const char *tag = "miniplayer_playing";
+	if (live_mode) {
+		tag = "radio";
+	} else if (audiobook_mode) {
+		tag = "audiobooks";
+	} else if (podcast_mode) {
+		tag = "podcast";
+	}
+	set_label_text_if_changed(header_title_label, tr(tag));
+}
+
+// ---------------------------------------------------------------------------
+// 3-Slot Swipeable Album Artwork Carousel
+// ---------------------------------------------------------------------------
+
+static void slot_clear_cover(carousel_slot_t *s) {
+	if (s->img) {
+		lv_image_set_src(s->img, NULL);
+		lv_obj_set_hidden(s->img, true);
+	}
+	if (s->placeholder) {
+		lv_obj_set_hidden(s->placeholder, false);
+	}
+	if (s->has_cover) {
+		cover_free(&s->cover);
+		s->has_cover = false;
+	}
+}
+
+static void slot_apply_geometry(carousel_slot_t *s, int max_box) {
+	if (!s->frame) {
+		return;
+	}
+	if (s->has_cover && s->cover.pixels) {
+		int iw = (int)s->cover.dsc.header.w;
+		int ih = (int)s->cover.dsc.header.h;
+		// Maintain original aspect ratio without stretching or boxing; for tiny
+		// low-res thumbnails (< 55% of stage), rest them inside a clean matte
+		// sleeve square so they feel intentional rather than lost.
+		bool tiny = (iw < max_box * 55 / 100 && ih < max_box * 55 / 100);
+		int fw = tiny ? max_box : iw;
+		int fh = tiny ? max_box : ih;
+		lv_obj_set_size(s->frame, fw, fh);
+		lv_obj_set_style_bg_opa(s->frame, tiny ? LV_OPA_COVER : LV_OPA_TRANSP, 0);
+		lv_image_set_src(s->img, &s->cover.dsc);
+		lv_obj_set_size(s->img, iw, ih);
+		lv_image_set_inner_align(s->img, LV_IMAGE_ALIGN_CENTER);
+		lv_obj_center(s->img);
+		lv_obj_set_hidden(s->img, false);
+		if (s->placeholder) {
+			lv_obj_set_hidden(s->placeholder, true);
+		}
+	} else {
+		lv_obj_set_size(s->frame, max_box, max_box);
+		lv_obj_set_style_bg_opa(s->frame, LV_OPA_COVER, 0);
+		if (s->img) {
+			lv_obj_set_hidden(s->img, true);
+		}
+		if (s->placeholder) {
+			lv_obj_set_hidden(s->placeholder, false);
+			lv_obj_center(s->placeholder);
 		}
 	}
 }
 
-// "3/24": which track of the queue is playing.
-//
-// It reads the queue itself, so it says the same thing whatever filled it --
-// tracks off the card, a podcast's episodes, a Tidal or Qobuz album.
-//
-// The number is the track's place in the LIST, not in the dealt order: under
-// shuffle those are two different things, and the list is the one that means
-// something. Counting the deal gives a number that climbs by one at every
-// track, which reads as a position in an album but is not one, since the
-// tracks are picked at random from all over the card. Outside shuffle the two
-// orders are the same array and the reading is identical.
-//
-// Blank rather than "1/1" when there is nothing to be lost in: a single track,
-// a book (one long file), a stream (no queue at all), or playback that belongs
-// to a phone over DLNA.
+static int carousel_stride(void) {
+	return screen_w - 2 * CAROUSEL_PEEK_PX;
+}
+
+static void carousel_layout_slots(void) {
+	if (!carousel_stage) {
+		return;
+	}
+
+	int stride = carousel_stride();
+	int32_t dx = carousel_offset_px;
+	int cy = stage_h / 2;
+
+	// Hero slot (1)
+	int hw = lv_obj_get_width(cslots[1].frame);
+	int hh = lv_obj_get_height(cslots[1].frame);
+	if (hw <= 0) hw = hero_box;
+	if (hh <= 0) hh = hero_box;
+	int hero_cx = screen_w / 2 + (int)dx;
+	lv_obj_set_pos(cslots[1].frame, hero_cx - hw / 2, cy - hh / 2);
+
+	int abs_dx = dx < 0 ? (int)(-dx) : (int)dx;
+	if (abs_dx > stride) {
+		abs_dx = stride;
+	}
+	lv_opa_t hero_opa = (lv_opa_t)(255 - (abs_dx * 85) / stride);
+	lv_obj_set_style_opa(cslots[1].frame, hero_opa, 0);
+
+	// Previous slot (0)
+	if (carousel_has_prev && lyrics_state == LYRICS_VIEW_NONE) {
+		int pw = lv_obj_get_width(cslots[0].frame);
+		int ph = lv_obj_get_height(cslots[0].frame);
+		if (pw <= 0) pw = peek_box;
+		if (ph <= 0) ph = peek_box;
+		int rest_cx = CAROUSEL_PEEK_PX - pw / 2;
+		int target_cx = screen_w / 2;
+		int cx0;
+		lv_opa_t opa0 = 165;
+		if (dx >= 0) {
+			int t = (int)dx > stride ? stride : (int)dx;
+			cx0 = rest_cx + (target_cx - rest_cx) * t / stride;
+			opa0 = (lv_opa_t)(165 + (90 * t) / stride);
+		} else {
+			cx0 = rest_cx + (int)dx;
+		}
+		lv_obj_set_pos(cslots[0].frame, cx0 - pw / 2, cy - ph / 2);
+		lv_obj_set_style_opa(cslots[0].frame, opa0, 0);
+		lv_obj_set_hidden(cslots[0].frame, false);
+	} else {
+		lv_obj_set_hidden(cslots[0].frame, true);
+	}
+
+	// Next slot (2)
+	if (carousel_has_next && lyrics_state == LYRICS_VIEW_NONE) {
+		int nw = lv_obj_get_width(cslots[2].frame);
+		int nh = lv_obj_get_height(cslots[2].frame);
+		if (nw <= 0) nw = peek_box;
+		if (nh <= 0) nh = peek_box;
+		int rest_cx = (screen_w - CAROUSEL_PEEK_PX) + nw / 2;
+		int target_cx = screen_w / 2;
+		int cx2;
+		lv_opa_t opa2 = 165;
+		if (dx <= 0) {
+			int t = (int)(-dx) > stride ? stride : (int)(-dx);
+			cx2 = rest_cx - (rest_cx - target_cx) * t / stride;
+			opa2 = (lv_opa_t)(165 + (90 * t) / stride);
+		} else {
+			cx2 = rest_cx + (int)dx;
+		}
+		lv_obj_set_pos(cslots[2].frame, cx2 - nw / 2, cy - nh / 2);
+		lv_obj_set_style_opa(cslots[2].frame, opa2, 0);
+		lv_obj_set_hidden(cslots[2].frame, false);
+	} else {
+		lv_obj_set_hidden(cslots[2].frame, true);
+	}
+
+	// Badges ride the top-right corner of the hero frame
+	lv_obj_t *const badges[] = {live_badge, qobuz_badge, tidal_badge, podcast_badge};
+	for (size_t i = 0; i < sizeof(badges) / sizeof(badges[0]); i++) {
+		if (badges[i] && !lv_obj_is_hidden(badges[i])) {
+			lv_obj_align(badges[i], LV_ALIGN_TOP_RIGHT, -BADGE_INSET, BADGE_INSET);
+			lv_obj_move_foreground(badges[i]);
+		}
+	}
+}
+
+static void carousel_update_drag_caption(int32_t dx) {
+	if (!drag_caption_pill || !drag_caption_label) {
+		return;
+	}
+	if (dx > -22 && dx < 22) {
+		lv_obj_set_hidden(drag_caption_pill, true);
+		return;
+	}
+
+	int dir = (dx < 0) ? 1 : -1;
+	char title[256] = "";
+	char artist[256] = "";
+	if (!upnext_get_adjacent(dir, NULL, 0, title, sizeof(title), artist, sizeof(artist)) || !title[0]) {
+		lv_obj_set_hidden(drag_caption_pill, true);
+		return;
+	}
+
+	char line[384];
+	const char *prefix = (dir > 0) ? tr("up_next") : tr("previous");
+	if (artist[0]) {
+		snprintf(line, sizeof(line), "%s · %s — %s", prefix, title, artist);
+	} else {
+		snprintf(line, sizeof(line), "%s · %s", prefix, title);
+	}
+	set_label_text_if_changed(drag_caption_label, line);
+
+	int abs_dx = dx < 0 ? (int)(-dx) : (int)dx;
+	int opa = 120 + (abs_dx - 22) * 2;
+	if (opa > 240) {
+		opa = 240;
+	}
+	lv_obj_set_style_opa(drag_caption_pill, (lv_opa_t)opa, 0);
+	lv_obj_set_hidden(drag_caption_pill, false);
+	lv_obj_move_foreground(drag_caption_pill);
+}
+
+static void carousel_offset_exec_cb(void *var, int32_t v) {
+	(void)var;
+	carousel_offset_px = v;
+	carousel_layout_slots();
+	if (v == 0 && drag_caption_pill) {
+		lv_obj_set_hidden(drag_caption_pill, true);
+	}
+}
+
+static void carousel_animate_to_rest(void) {
+	lv_anim_delete(&carousel_anim_tag, carousel_offset_exec_cb);
+	if (drag_caption_pill) {
+		lv_obj_set_hidden(drag_caption_pill, true);
+	}
+	if (carousel_offset_px == 0 || !motion_enabled()) {
+		carousel_offset_px = 0;
+		carousel_layout_slots();
+		return;
+	}
+	lv_anim_t a;
+	lv_anim_init(&a);
+	lv_anim_set_var(&a, &carousel_anim_tag);
+	lv_anim_set_exec_cb(&a, carousel_offset_exec_cb);
+	lv_anim_set_values(&a, carousel_offset_px, 0);
+	lv_anim_set_duration(&a, CAROUSEL_SLIDE_MS);
+	lv_anim_set_path_cb(&a, lv_anim_path_ease_out);
+	lv_anim_start(&a);
+}
+
+static void carousel_animate_from(int32_t start_offset) {
+	if (!motion_enabled() || lyrics_state != LYRICS_VIEW_NONE) {
+		carousel_offset_px = 0;
+		carousel_layout_slots();
+		return;
+	}
+	carousel_offset_px = start_offset;
+	carousel_layout_slots();
+	carousel_animate_to_rest();
+}
+
+static void carousel_sync_adjacent_Slot(int slot_idx, int coverloader_slot, bool *pending_flag, int dir,
+										bool *has_dir_out) {
+	carousel_slot_t *s = &cslots[slot_idx];
+	char want_path[512] = "";
+	bool exists = power_screen_is_on() && !live_mode &&
+				  upnext_get_adjacent(dir, want_path, sizeof(want_path), NULL, 0, NULL, 0) && want_path[0];
+
+	*has_dir_out = exists;
+	if (!exists) {
+		s->path[0] = '\0';
+		*pending_flag = false;
+		coverloader_release(coverloader_slot);
+		slot_clear_cover(s);
+		slot_apply_geometry(s, peek_box);
+		return;
+	}
+
+	if (strcmp(s->path, want_path) == 0 && (s->has_cover || *pending_flag)) {
+		return;
+	}
+
+	snprintf(s->path, sizeof(s->path), "%s", want_path);
+	slot_clear_cover(s);
+
+	// Fast synchronous reuse if identical to hero cover already settled in RAM.
+	if (cslots[1].has_cover && cslots[1].cover.pixels && !cover_request_outstanding &&
+		cover_id_state == COVER_ID_IDLE && strcmp(cover_shown_path, want_path) == 0) {
+		cover_image_t scaled;
+		if (cover_scaled_copy(&cslots[1].cover, peek_box, &scaled)) {
+			s->cover = scaled;
+			s->cover.dsc.data = s->cover.pixels;
+			s->has_cover = true;
+			*pending_flag = false;
+			coverloader_release(coverloader_slot);
+			slot_apply_geometry(s, peek_box);
+			return;
+		}
+	}
+
+	slot_apply_geometry(s, peek_box);
+	*pending_flag = true;
+	coverloader_request_carousel(coverloader_slot, want_path, peek_box, hero_box, hero_box);
+	cover_poll_start();
+}
+
+static void carousel_sync_adjacent_requests(void) {
+	carousel_sync_adjacent_Slot(0, COVERLOADER_CAROUSEL_PREV, &prev_cover_pending, -1, &carousel_has_prev);
+	carousel_sync_adjacent_Slot(2, COVERLOADER_CAROUSEL_NEXT, &next_cover_pending, 1, &carousel_has_next);
+	carousel_layout_slots();
+}
+
+static void carousel_poll_adjacent(void) {
+	bool updated = false;
+	if (prev_cover_pending) {
+		cover_image_t img = {0};
+		bool finished = false;
+		bool ok = coverloader_take(COVERLOADER_CAROUSEL_PREV, &img, &finished);
+		if (finished) {
+			prev_cover_pending = false;
+			slot_clear_cover(&cslots[0]);
+			if (ok) {
+				cslots[0].cover = img;
+				cslots[0].cover.dsc.data = cslots[0].cover.pixels;
+				cslots[0].has_cover = true;
+			}
+			slot_apply_geometry(&cslots[0], peek_box);
+			updated = true;
+		}
+	}
+	if (next_cover_pending) {
+		cover_image_t img = {0};
+		bool finished = false;
+		bool ok = coverloader_take(COVERLOADER_CAROUSEL_NEXT, &img, &finished);
+		if (finished) {
+			next_cover_pending = false;
+			slot_clear_cover(&cslots[2]);
+			if (ok) {
+				cslots[2].cover = img;
+				cslots[2].cover.dsc.data = cslots[2].cover.pixels;
+				cslots[2].has_cover = true;
+			}
+			slot_apply_geometry(&cslots[2], peek_box);
+			updated = true;
+		}
+	}
+	if (updated) {
+		carousel_layout_slots();
+	}
+}
+
+// Touch gesture on carousel_stage: horizontal track skip with live translation,
+// Up Next reveal, rubber-band bounds, and strict single-track commit.
+static void carousel_drag_cb(lv_event_t *e) {
+	static lv_point_t start_pt;
+	static lv_point_t last_pt;
+	static uint32_t last_tick;
+	static int32_t vel_q8; // EWMA dx velocity in (px * 256) / ms
+	static bool tracking;
+	static bool engaged;
+
+	lv_event_code_t code = lv_event_get_code(e);
+	lv_indev_t *indev = lv_indev_active();
+	if (!indev || lyrics_state != LYRICS_VIEW_NONE) {
+		return;
+	}
+
+	if (code == LV_EVENT_PRESSED) {
+		lv_indev_get_point(indev, &start_pt);
+		last_pt = start_pt;
+		last_tick = lv_tick_get();
+		vel_q8 = 0;
+		tracking = true;
+		engaged = false;
+		return;
+	}
+	if (!tracking) {
+		return;
+	}
+
+	lv_point_t p;
+	lv_indev_get_point(indev, &p);
+	int dx = p.x - start_pt.x;
+	int dy = p.y - start_pt.y;
+
+	if (code == LV_EVENT_PRESSING) {
+		uint32_t now = lv_tick_get();
+		uint32_t dt = now - last_tick;
+		if (dt > 0) {
+			int32_t sample = ((int32_t)(p.x - last_pt.x) * 256) / (int32_t)dt;
+			vel_q8 = (vel_q8 + sample) / 2;
+			last_pt = p;
+			last_tick = now;
+		}
+
+		if (!engaged) {
+			int adx = dx < 0 ? -dx : dx;
+			int ady = dy < 0 ? -dy : dy;
+			if (ady >= CAROUSEL_DRAG_PX && ady > adx) {
+				tracking = false;
+				return;
+			}
+			if (adx < CAROUSEL_DRAG_PX || adx <= ady) {
+				return;
+			}
+			engaged = true;
+			lv_anim_delete(&carousel_anim_tag, carousel_offset_exec_cb);
+		}
+
+		// Determine if this swipe direction can commit a track step
+		bool can_step = live_mode ? live_custom_nav : device_state_can_skip_track();
+
+		int32_t eff_dx = dx;
+		if (!can_step) {
+			eff_dx = dx / 4; // tactile rubber-band resistance at boundary
+		}
+		int stride = carousel_stride();
+		if (eff_dx > stride) eff_dx = stride;
+		if (eff_dx < -stride) eff_dx = -stride;
+
+		carousel_offset_px = eff_dx;
+		carousel_layout_slots();
+		carousel_update_drag_caption(dx);
+		return;
+	}
+
+	if (code == LV_EVENT_RELEASED || code == LV_EVENT_PRESS_LOST) {
+		tracking = false;
+		if (!engaged) {
+			return;
+		}
+		engaged = false;
+		if (drag_caption_pill) {
+			lv_obj_set_hidden(drag_caption_pill, true);
+		}
+
+		if (lv_tick_elaps(last_tick) > 80) {
+			vel_q8 = 0;
+		}
+
+		bool can_step = live_mode ? live_custom_nav : device_state_can_skip_track();
+
+		int threshold = screen_w / 5; // 96 px on R1
+		bool flick_next = (dx <= -36 && vel_q8 < -115); // ~0.45 px/ms
+		bool flick_prev = (dx >= 36 && vel_q8 > 115);
+
+		if (dx < 0 && can_step && (-dx >= threshold || flick_next)) {
+			int32_t carry = carousel_stride() + carousel_offset_px;
+			if (carry < 0) carry = 0;
+			if (live_mode && live_custom_nav) {
+				if (radio_step(1)) {
+					refresh_now_playing();
+					carousel_animate_from(carry);
+					return;
+				}
+			} else if (device_state_next(NULL, 0)) {
+				refresh_now_playing();
+				carousel_animate_from(carry);
+				return;
+			}
+		} else if (dx > 0 && can_step && (dx >= threshold || flick_prev)) {
+			int32_t carry = -carousel_stride() + carousel_offset_px;
+			if (carry > 0) carry = 0;
+			if (live_mode && live_custom_nav) {
+				if (radio_step(-1)) {
+					refresh_now_playing();
+					carousel_animate_from(carry);
+					return;
+				}
+			} else if (device_state_prev(NULL, 0)) {
+				refresh_now_playing();
+				carousel_animate_from(carry);
+				return;
+			}
+		}
+
+		carousel_animate_to_rest();
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Hero Artwork Loader & Same-Album Deduplication
+// ---------------------------------------------------------------------------
+
+void player_set_cover_release_cb(void (*cb)(void)) {
+	cover_release_cb = cb;
+}
+
+void player_cover_box(int *w, int *h) {
+	if (w) *w = hero_box;
+	if (h) *h = hero_box;
+}
+
+const lv_image_dsc_t *player_cover_image(void) {
+	return (cslots[1].has_cover && cslots[1].cover.pixels) ? &cslots[1].cover.dsc : NULL;
+}
+
+// Ambient Edition avoids keeping a 750 KiB full-screen runtime blur buffer in
+// memory; screensaver.c falls back cleanly to its built-in dark strip.
+const lv_image_dsc_t *player_backdrop_image(void) {
+	return NULL;
+}
+
+bool player_cover_copy(int size, cover_image_t *out, uint64_t *id) {
+	if (id) *id = 0;
+	if (!cslots[1].has_cover || !cslots[1].cover.pixels || cover_request_outstanding ||
+		cover_id_state != COVER_ID_IDLE) {
+		return false;
+	}
+	if (!cover_scaled_copy(&cslots[1].cover, size, out)) {
+		return false;
+	}
+	if (id) *id = cover_shown_id;
+	return true;
+}
+
+static void update_fs_thumb(void) {
+	if (!fs_thumb_img || !fs_thumb_fallback) {
+		return;
+	}
+	if (fs_has_thumb) {
+		lv_image_set_src(fs_thumb_img, NULL);
+		cover_free(&fs_thumb_cover);
+		fs_has_thumb = false;
+	}
+	if (cslots[1].has_cover && cslots[1].cover.pixels && cover_scaled_copy(&cslots[1].cover, 44, &fs_thumb_cover)) {
+		fs_thumb_cover.dsc.data = fs_thumb_cover.pixels;
+		fs_has_thumb = true;
+		lv_image_set_src(fs_thumb_img, &fs_thumb_cover.dsc);
+		lv_obj_set_hidden(fs_thumb_img, false);
+		lv_obj_set_hidden(fs_thumb_fallback, true);
+	} else {
+		lv_image_set_src(fs_thumb_img, NULL);
+		lv_obj_set_hidden(fs_thumb_img, true);
+		lv_obj_set_hidden(fs_thumb_fallback, false);
+	}
+}
+
+static void reload_hero_cover(const char *filepath) {
+	if (!filepath || !filepath[0]) {
+		if (cover_release_cb) {
+			cover_release_cb();
+		}
+		slot_clear_cover(&cslots[1]);
+		slot_apply_geometry(&cslots[1], hero_box);
+		carousel_layout_slots();
+
+		current_has_cover = false;
+		current_raw_tone = 0;
+		current_mean_luma = -1;
+		cover_shown_id = 0;
+		cover_request_outstanding = false;
+
+		update_fs_thumb();
+		recompute_palette(true);
+		bar_over_player_update();
+		return;
+	}
+
+	// Request ONLY the hero cover (0 x 0 backdrop skips the 750 KiB blur buffer).
+	coverloader_request_player(filepath, hero_box, hero_box, 0, 0);
+	cover_request_outstanding = true;
+	lv_timer_resume(progress_slider_timer);
+	cover_poll_start();
+}
+
+static void refresh_cover(const char *filepath) {
+	if (!cslots[1].frame) {
+		return;
+	}
+	snprintf(cover_shown_path, sizeof(cover_shown_path), "%s", filepath ? filepath : "");
+
+	if (cover_shown_id != 0 && cslots[1].has_cover && cslots[1].cover.pixels && filepath && filepath[0]) {
+		cover_id_state = COVER_ID_NEW_TRACK;
+		coverloader_request_player_id(filepath);
+		lv_timer_resume(progress_slider_timer);
+		cover_poll_start();
+		return;
+	}
+
+	cover_id_state = COVER_ID_IDLE;
+	cover_incoming_id = 0;
+	reload_hero_cover(filepath);
+}
+
+static void apply_cover_id_result(void) {
+	if (cover_id_state == COVER_ID_IDLE) {
+		return;
+	}
+	uint64_t id = 0;
+	bool finished = false;
+	coverloader_take_player_id(&id, &finished);
+	if (!finished) {
+		return;
+	}
+
+	if (cover_id_state == COVER_ID_MEASURE) {
+		cover_id_state = COVER_ID_IDLE;
+		cover_shown_id = id;
+		carousel_sync_adjacent_requests();
+		return;
+	}
+
+	cover_id_state = COVER_ID_IDLE;
+	if (id != 0 && id == cover_shown_id) {
+		// Identical artwork across tracks of the same album: zero decode, zero blink.
+		carousel_sync_adjacent_requests();
+		return;
+	}
+
+	cover_incoming_id = id;
+	reload_hero_cover(cover_shown_path);
+}
+
+static void apply_cover_result(void) {
+	if (!cover_request_outstanding) {
+		return;
+	}
+
+	cover_image_t new_cover = {0}, unused_backdrop = {0};
+	bool finished = false;
+	bool has_cover = coverloader_take_player(&new_cover, &unused_backdrop, &finished);
+	if (!finished) {
+		return;
+	}
+	cover_request_outstanding = false;
+	cover_free(&unused_backdrop);
+
+	if (cover_release_cb) {
+		cover_release_cb();
+	}
+	slot_clear_cover(&cslots[1]);
+
+	if (has_cover && new_cover.pixels) {
+		cslots[1].cover = new_cover;
+		cslots[1].cover.dsc.data = cslots[1].cover.pixels;
+		cslots[1].has_cover = true;
+
+		cover_shown_id = cover_incoming_id;
+		if (cover_shown_id == 0 && cover_shown_path[0]) {
+			cover_id_state = COVER_ID_MEASURE;
+			coverloader_request_player_id(cover_shown_path);
+			cover_poll_start();
+		}
+
+		uint32_t tone = 0;
+		int luma = -1;
+		bool light = false;
+		// Extract the dominant luminous chromatic family (light_from = 0) so dark
+		// sleeves with vivid focal art yield their focal accent hue rather than
+		// their near-black background shadow.
+		if (!cover_page_tone(&cslots[1].cover, 0, &tone, &luma, &light)) {
+			if (cslots[1].cover.has_tone) {
+				tone = cslots[1].cover.tone;
+				luma = cslots[1].cover.tone_luma;
+			} else {
+				tone = 0;
+				luma = cover_mean_luma(&cslots[1].cover);
+			}
+		}
+		current_has_cover = true;
+		current_raw_tone = tone;
+		current_mean_luma = luma;
+	} else {
+		cover_free(&new_cover);
+		cover_shown_id = 0;
+		current_has_cover = false;
+		current_raw_tone = 0;
+		current_mean_luma = -1;
+	}
+
+	cover_incoming_id = 0;
+	slot_apply_geometry(&cslots[1], hero_box);
+	carousel_layout_slots();
+	update_fs_thumb();
+	recompute_palette(true);
+	bar_over_player_update();
+	carousel_sync_adjacent_requests();
+	notify_state_cbs();
+}
+
+static void cover_poll_cb(lv_timer_t *timer) {
+	apply_cover_id_result();
+	apply_cover_result();
+	carousel_poll_adjacent();
+	if (!cover_request_outstanding && cover_id_state == COVER_ID_IDLE && !prev_cover_pending && !next_cover_pending) {
+		lv_timer_pause(timer);
+	}
+}
+
+static void cover_poll_start(void) {
+	if (!cover_poll_timer) {
+		cover_poll_timer = lv_timer_create(cover_poll_cb, COVER_POLL_MS, NULL);
+	}
+	lv_timer_resume(cover_poll_timer);
+}
+
+// ---------------------------------------------------------------------------
+// 72-Bar Minimalist Audio Waveform & Seek Bar
+// ---------------------------------------------------------------------------
+
+static void view_update(double position, double total) {
+	view_start = 0;
+	view_length = total > 0 ? total : 0;
+	if (view_length <= 0 || !audiobook_mode || !audiobook_has_chapters || !audiobook_duration_per_chapter()) {
+		return;
+	}
+	int index = audiobook_chapter_at(position);
+	double start = 0;
+	if (index < 0 || !audiobook_chapter(index, NULL, 0, &start)) {
+		return;
+	}
+	double end = total;
+	if (!audiobook_chapter(index + 1, NULL, 0, &end) || end > total) {
+		end = total;
+	}
+	if (start < 0 || end - start < 1.0) {
+		return;
+	}
+	view_start = start;
+	view_length = end - start;
+}
+
+static int view_value(double position) {
+	if (view_length <= 0) {
+		return 0;
+	}
+	double fraction = (position - view_start) / view_length;
+	if (fraction < 0) fraction = 0;
+	if (fraction > 1) fraction = 1;
+	return (int)(fraction * 1000.0 + 0.5);
+}
+
+static double view_seconds(int value) {
+	return view_start + view_length * (double)value / 1000.0;
+}
+
+static int wave_played_px(double position) {
+	double fraction = view_length > 0.1 ? (double)view_value(position) / 1000.0 : 0.0;
+	int total_span = WAVEFORM_BARS * WAVE_BAR_PITCH - WAVE_BAR_GAP;
+	int left = (wave_w - total_span) / 2;
+	return left + (int)(fraction * (double)total_span + 0.5);
+}
+
+static uint32_t current_wave_color_sig(void) {
+	return ((uint32_t)pal_cur.accent.red << 24) | ((uint32_t)pal_cur.accent.green << 16) |
+		   ((uint32_t)pal_cur.accent.blue << 8) | (uint32_t)pal_cur.wave_unplayed.blue | 1u;
+}
+
+static void sync_wave_or_slider_mode(bool show_waveform) {
+	if (!progress_slider || !wave_box) {
+		return;
+	}
+	bool seekable = !live_mode && view_length > 0.1;
+	if (seekable) {
+		lv_obj_remove_state(progress_slider, LV_STATE_DISABLED);
+		if (fs_slider) lv_obj_remove_state(fs_slider, LV_STATE_DISABLED);
+	} else {
+		lv_obj_add_state(progress_slider, LV_STATE_DISABLED);
+		if (fs_slider) lv_obj_add_state(fs_slider, LV_STATE_DISABLED);
+	}
+
+	bool use_wave = show_waveform && wave_canvas != NULL && wave_ready > 0 && !live_mode;
+	if (wave_canvas) {
+		lv_obj_set_hidden(wave_canvas, !use_wave);
+	}
+
+	if (use_wave) {
+		lv_obj_set_size(progress_slider, lv_pct(100), wave_h);
+		lv_obj_align(progress_slider, LV_ALIGN_CENTER, 0, 0);
+		lv_obj_set_style_bg_opa(progress_slider, LV_OPA_TRANSP, LV_PART_MAIN);
+		lv_obj_set_style_bg_opa(progress_slider, LV_OPA_TRANSP, LV_PART_INDICATOR);
+		lv_obj_set_style_opa(progress_slider, LV_OPA_TRANSP, LV_PART_KNOB);
+	} else {
+		lv_obj_set_size(progress_slider, lv_pct(100), 4);
+		lv_obj_align(progress_slider, LV_ALIGN_CENTER, 0, 0);
+		lv_obj_set_style_bg_opa(progress_slider, LV_OPA_COVER, LV_PART_MAIN);
+		lv_obj_set_style_bg_opa(progress_slider, LV_OPA_COVER, LV_PART_INDICATOR);
+		lv_obj_set_style_opa(progress_slider, seekable ? LV_OPA_COVER : LV_OPA_TRANSP, LV_PART_KNOB);
+	}
+	lv_obj_move_foreground(progress_slider);
+}
+
+static void wave_paint(int played_px) {
+	if (!wave_buf || !wave_canvas || wave_w <= 0) {
+		return;
+	}
+
+	int w = wave_w;
+	int h = wave_h;
+	uint16_t *colour = (uint16_t *)wave_buf;
+	uint8_t *alpha = wave_buf + (size_t)w * (size_t)h * 2;
+	memset(alpha, 0, (size_t)w * (size_t)h);
+
+	lv_color_t c_elap = pal_cur.accent;
+	lv_color_t c_rem = pal_cur.wave_unplayed;
+	uint16_t px_elap = (uint16_t)(((c_elap.red & 0xF8) << 8) | ((c_elap.green & 0xFC) << 3) | (c_elap.blue >> 3));
+	uint16_t px_rem = (uint16_t)(((c_rem.red & 0xF8) << 8) | ((c_rem.green & 0xFC) << 3) | (c_rem.blue >> 3));
+
+	int total_span = WAVEFORM_BARS * WAVE_BAR_PITCH - WAVE_BAR_GAP;
+	int left = (w - total_span) / 2;
+	int middle = h / 2;
+	int reach = h / 2 - 1;
+	if (reach < WAVE_MIN_HALF) {
+		reach = WAVE_MIN_HALF;
+	}
+
+	for (int i = 0; i < WAVEFORM_BARS; i++) {
+		int val = (i < wave_ready) ? wave_bars[i] : 0;
+		int half = (val * reach) / 235;
+		if (half > reach) half = reach;
+		if (half < WAVE_MIN_HALF) half = WAVE_MIN_HALF;
+
+		int x0 = left + i * WAVE_BAR_PITCH;
+		for (int dx = 0; dx < WAVE_BAR_SOLID; dx++) {
+			int x = x0 + dx;
+			if (x < 0 || x >= w) {
+				continue;
+			}
+			bool elapsed = (x < played_px);
+			uint16_t packed = elapsed ? px_elap : px_rem;
+			uint8_t opa = elapsed ? 255 : WAVE_TODO_OPA;
+
+			// Rounded 4px capsule ends: outer columns (dx==0 or dx==3) inset 1px vertically.
+			int cap = (dx == 0 || dx == WAVE_BAR_SOLID - 1) ? 1 : 0;
+			int y0 = middle - half + cap;
+			int y1 = middle + half - cap;
+			if (y0 > y1) {
+				y0 = y1 = middle;
+			}
+			for (int y = y0; y <= y1; y++) {
+				if (y >= 0 && y < h) {
+					size_t at = (size_t)y * (size_t)w + (size_t)x;
+					colour[at] = packed;
+					alpha[at] = opa;
+				}
+			}
+		}
+	}
+
+	wave_drawn_px = played_px;
+	wave_drawn_sig = current_wave_color_sig();
+	lv_obj_invalidate(wave_canvas);
+}
+
+static void wave_preview(double seconds) {
+	if (!wave_canvas || lv_obj_is_hidden(wave_canvas) || view_length <= 0.1) {
+		return;
+	}
+	int px = wave_played_px(seconds);
+	if (px == wave_drawn_px && wave_drawn_sig == current_wave_color_sig()) {
+		return;
+	}
+	wave_paint(px);
+}
+
+static void wave_refresh(const char *path, double position) {
+	device_state_t state;
+	device_state_get(&state);
+	bool local = playing_local_file(&state);
+
+	if (!local || !path || !path[0] || !wave_canvas) {
+		wave_ready = 0;
+		sync_wave_or_slider_mode(false);
+		return;
+	}
+
+	int had = wave_ready;
+	uint8_t before[WAVEFORM_BARS];
+	memcpy(before, wave_bars, sizeof(before));
+	wave_ready = waveform_get(path, wave_bars);
+
+	sync_wave_or_slider_mode(wave_ready > 0);
+	if (wave_ready <= 0) {
+		return;
+	}
+
+	bool same_shape = (wave_ready == had && memcmp(before, wave_bars, (size_t)wave_ready) == 0);
+	int px = wave_played_px(position);
+	uint32_t sig = current_wave_color_sig();
+	if (same_shape && px == wave_drawn_px && sig == wave_drawn_sig) {
+		return;
+	}
+	wave_paint(px);
+}
+
+static void set_progress_label(double current_secs, double total_secs) {
+	view_update(current_secs, total_secs);
+	double shown = 0;
+	int val = 0;
+	if (view_length > 0) {
+		val = view_value(current_secs);
+		if (!slider_dragging) {
+			if (progress_slider) lv_slider_set_value(progress_slider, val, LV_ANIM_OFF);
+			if (fs_slider) lv_slider_set_value(fs_slider, val, LV_ANIM_OFF);
+		}
+		shown = current_secs - view_start;
+		if (shown < 0) shown = 0;
+	} else if (!slider_dragging) {
+		if (progress_slider) lv_slider_set_value(progress_slider, 0, LV_ANIM_OFF);
+		if (fs_slider) lv_slider_set_value(fs_slider, 0, LV_ANIM_OFF);
+	}
+
+	if (!slider_dragging) {
+		formatDoubleSeconds(shown, progress_label_text, sizeof(progress_label_text));
+		set_label_text_if_changed(elapsed_label, progress_label_text);
+		set_label_text_if_changed(fs_elapsed_label, progress_label_text);
+	}
+
+	formatDoubleSeconds(view_length, progress_label_text, sizeof(progress_label_text));
+	set_label_text_if_changed(remaining_label, progress_label_text);
+	set_label_text_if_changed(fs_duration_label, progress_label_text);
+}
+
+static void seek_slider_event_cb(lv_event_t *e) {
+	lv_obj_t *active_slider = lv_event_get_current_target(e);
+	lv_event_code_t code = lv_event_get_code(e);
+
+	if (live_mode || view_length <= 0.1) {
+		return;
+	}
+
+	if (code == LV_EVENT_PRESSED) {
+		slider_dragging = true;
+		lv_timer_pause(progress_slider_timer);
+		smooth_timer_sync();
+		return;
+	}
+
+	if (code == LV_EVENT_VALUE_CHANGED) {
+		int value = (int)lv_slider_get_value(active_slider);
+		if (active_slider == progress_slider && fs_slider) {
+			lv_slider_set_value(fs_slider, value, LV_ANIM_OFF);
+		} else if (active_slider == fs_slider && progress_slider) {
+			lv_slider_set_value(progress_slider, value, LV_ANIM_OFF);
+		}
+		double seconds = view_seconds(value);
+		double shown = seconds - view_start;
+		if (shown < 0) shown = 0;
+		formatDoubleSeconds(shown, progress_label_text, sizeof(progress_label_text));
+		set_label_text_if_changed(elapsed_label, progress_label_text);
+		set_label_text_if_changed(fs_elapsed_label, progress_label_text);
+		wave_preview(seconds);
+		return;
+	}
+
+	if (code == LV_EVENT_RELEASED || code == LV_EVENT_PRESS_LOST) {
+		if (!slider_dragging) {
+			return;
+		}
+		slider_dragging = false;
+		int value = (int)lv_slider_get_value(active_slider);
+		double seconds = view_seconds(value);
+		device_state_seek(seconds);
+		progress_anchor_secs = seconds;
+		progress_anchor_tick = lv_tick_get();
+		lyrics_centred = false;
+		lyrics_follow(seconds);
+		lv_timer_resume(progress_slider_timer);
+		smooth_timer_sync();
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Authoritative Audio Metadata Line ("FLAC · 24-bit · 96 kHz")
+// ---------------------------------------------------------------------------
+
+static void format_description(const device_state_t *state, char *text, size_t size) {
+	text[0] = '\0';
+	if (state->live) {
+		radio_now_t now;
+		radio_get_now(&now);
+		if (now.bits > 0 && now.sample_rate > 0 && now.codec[0]) {
+			snprintf(text, size, "%s · %d-bit · %g kHz", now.codec, now.bits, now.sample_rate / 1000.0);
+		} else if (now.bitrate > 0) {
+			snprintf(text, size, "%s · %d kbps", now.codec[0] ? now.codec : "MP3", now.bitrate);
+		} else if (now.codec[0]) {
+			snprintf(text, size, "%s", now.codec);
+		}
+		return;
+	}
+
+	if (state->stream_sample_rate <= 0 || !state->current_file[0]) {
+		return;
+	}
+	if (podcastcache_is_episode(state->current_file)) {
+		return;
+	}
+
+	const char *dot = strrchr(state->current_file, '.');
+	char kind[8] = "";
+	if (dot) {
+		size_t k = 0;
+		for (const char *c = dot + 1; *c && k < sizeof(kind) - 1; c++) {
+			kind[k++] = (char)((*c >= 'a' && *c <= 'z') ? *c - 32 : *c);
+		}
+		kind[k] = '\0';
+	}
+
+	int dsd = audio_get_dsd_multiple();
+	if (dsd > 0) {
+		snprintf(text, size, "DSD%d", dsd);
+		return;
+	}
+
+	char codec[16] = "";
+	audio_get_stream_codec(codec, sizeof(codec));
+	const char *name = codec[0] ? codec : kind;
+
+	if (audio_stream_is_lossy()) {
+		int kbps = audio_get_stream_bitrate_kbps();
+		struct stat st;
+		if (kbps <= 0 && !qobuzcache_owns(state->current_file) && !tidalcache_owns(state->current_file) &&
+			state->progress_total_secs > 0.5 && stat(state->current_file, &st) == 0 && st.st_size > 0) {
+			kbps = (int)((double)st.st_size * 8.0 / state->progress_total_secs / 1000.0 + 0.5);
+		}
+		if (kbps > 0 && name[0]) {
+			snprintf(text, size, "%s · %d kbps", name, kbps);
+		} else if (kbps > 0) {
+			snprintf(text, size, "%d kbps", kbps);
+		} else {
+			snprintf(text, size, "%s", name);
+		}
+		return;
+	}
+
+	int bits = audio_get_stream_bits();
+	if (bits > 0 && name[0]) {
+		snprintf(text, size, "%s · %d-bit · %g kHz", name, bits, state->stream_sample_rate / 1000.0);
+	} else if (name[0]) {
+		snprintf(text, size, "%s · %g kHz", name, state->stream_sample_rate / 1000.0);
+	} else {
+		snprintf(text, size, "%g kHz", state->stream_sample_rate / 1000.0);
+	}
+}
+
+static void update_format_label(const device_state_t *state) {
+	if (!format_label) {
+		return;
+	}
+	char text[80];
+	format_description(state, text, sizeof(text));
+	set_label_text_if_changed(format_label, text);
+	lv_obj_set_hidden(format_label, text[0] == '\0');
+}
+
+// ---------------------------------------------------------------------------
+// Favorites, Badges, Speed & 5-Button Transport Controls
+// ---------------------------------------------------------------------------
+
+static long current_qobuz_track(void) {
+	device_state_t state;
+	device_state_get(&state);
+	return state.current_file[0] ? qobuzcache_track_id(state.current_file) : 0;
+}
+
+static long current_tidal_track(void) {
+	device_state_t state;
+	device_state_get(&state);
+	return state.current_file[0] ? tidalcache_track_id(state.current_file) : 0;
+}
+
+static bool podcast_current_feed(long long *id_out, podcast_feed_t *feed_out) {
+	device_state_t state;
+	device_state_get(&state);
+	if (state.live || !state.current_file[0]) {
+		return false;
+	}
+	long long id = 0;
+	if (!podcastcache_feed_id(state.current_file, &id) || id <= 0) {
+		return false;
+	}
+	if (id_out) *id_out = id;
+	if (feed_out) {
+		memset(feed_out, 0, sizeof(*feed_out));
+		feed_out->id = id;
+		snprintf(feed_out->title, sizeof(feed_out->title), "%.*s", (int)sizeof(feed_out->title) - 1,
+				 state.metadata.album);
+		podcastcache_tag(state.current_file, "feed_author", feed_out->author, sizeof(feed_out->author));
+		podcastcache_tag(state.current_file, "feed_image", feed_out->image, sizeof(feed_out->image));
+	}
+	return true;
+}
+
+bool player_current_podcast_feed(long long *id_out, podcast_feed_t *feed_out) {
+	return podcast_current_feed(id_out, feed_out);
+}
+
+static bool current_podcast_episode(void) {
+	device_state_t state;
+	device_state_get(&state);
+	return state.current_file[0] && podcastcache_is_episode(state.current_file);
+}
+
+static void update_service_badges(void) {
+	bool from_qobuz = !live_mode && current_qobuz_track() != 0;
+	bool from_tidal = !live_mode && !from_qobuz && current_tidal_track() != 0;
+	bool from_podcast = !live_mode && !from_qobuz && !from_tidal && current_podcast_episode();
+
+	if (live_badge) lv_obj_set_hidden(live_badge, !live_mode);
+	if (qobuz_badge) lv_obj_set_hidden(qobuz_badge, !from_qobuz);
+	if (tidal_badge) lv_obj_set_hidden(tidal_badge, !from_tidal);
+	if (podcast_badge) lv_obj_set_hidden(podcast_badge, !from_podcast);
+	carousel_layout_slots();
+}
+
+static void fav_refresh_async(void *user) {
+	(void)user;
+	update_fav_button();
+}
+
+static void qobuz_favorites_changed(void) { gui_post(fav_refresh_async, NULL); }
+static void tidal_favorites_changed(void) { gui_post(fav_refresh_async, NULL); }
+
+static void update_fav_button(void) {
+	if (!fav_btn_icon) {
+		return;
+	}
+	radio_station_t station;
+	bool starred = false;
+	long qobuz_id = 0;
+	long tidal_id = 0;
+	long long feed_id = 0;
+
+	if (radio_current_station(&station)) {
+		starred = radio_fav_contains(station.uuid);
+	} else if (podcast_current_feed(&feed_id, NULL)) {
+		starred = podcastsubs_is_followed(feed_id);
+	} else if ((qobuz_id = current_qobuz_track()) > 0) {
+		starred = qobuzsync_is_favorite(qobuz_id);
+		qobuzsync_favorites_refresh(qobuz_favorites_changed);
+	} else if ((tidal_id = current_tidal_track()) > 0) {
+		starred = tidalsync_is_favorite(tidal_id);
+		tidalsync_favorites_refresh(tidal_favorites_changed);
+	} else {
+		device_state_t state;
+		device_state_get(&state);
+		starred = state.current_file[0] && library_fav_contains(state.current_file);
+	}
+
+	if (starred) {
+		lv_image_set_src(fav_btn_icon, &icon_star_filled);
+		lv_obj_set_style_image_recolor(fav_btn_icon, pal_cur.accent, 0);
+		lv_obj_set_style_image_opa(fav_btn_icon, LV_OPA_COVER, 0);
+	} else {
+		lv_image_set_src(fav_btn_icon, &icon_star);
+		lv_obj_set_style_image_recolor(fav_btn_icon, pal_cur.text_secondary, 0);
+		lv_obj_set_style_image_opa(fav_btn_icon, LV_OPA_80, 0);
+	}
+	lv_obj_set_style_image_recolor_opa(fav_btn_icon, LV_OPA_COVER, 0);
+}
+
+static char fav_error[192];
+
+static void fav_error_async(void *user) {
+	(void)user;
+	if (fav_error[0]) {
+		gui_notify_popup(fav_error);
+	}
+	update_fav_button();
+}
+
+static void qobuz_fav_done(bool ok, const char *error, void *user) {
+	(void)user;
+	snprintf(fav_error, sizeof(fav_error), "%s", ok ? "" : (error && error[0] ? error : tr("qobuz_favourites_failed")));
+	gui_post(fav_error_async, NULL);
+}
+
+static void tidal_fav_done(bool ok, const char *error, void *user) {
+	(void)user;
+	snprintf(fav_error, sizeof(fav_error), "%s", ok ? "" : (error && error[0] ? error : tr("tidal_favourites_failed")));
+	gui_post(fav_error_async, NULL);
+}
+
+static void fav_btn_event_cb(lv_event_t *e) {
+	(void)e;
+	if (player_sheet_drag_active() || switcher_back_drag_active()) {
+		return;
+	}
+
+	radio_station_t station;
+	if (radio_current_station(&station)) {
+		if (radio_fav_contains(station.uuid)) {
+			radio_fav_remove(station.uuid);
+		} else {
+			radio_fav_add(&station);
+		}
+		update_fav_button();
+		return;
+	}
+
+	long long feed_id = 0;
+	podcast_feed_t feed;
+	if (podcast_current_feed(&feed_id, &feed)) {
+		if (podcastsubs_is_followed(feed_id)) {
+			podcastsubs_unfollow(feed_id);
+		} else {
+			podcastsubs_follow(&feed);
+		}
+		update_fav_button();
+		return;
+	}
+
+	device_state_t state;
+	device_state_get(&state);
+	if (!state.current_file[0]) {
+		return;
+	}
+
+	long qobuz_id = qobuzcache_track_id(state.current_file);
+	if (qobuz_id > 0) {
+		bool want = !qobuzsync_is_favorite(qobuz_id);
+		qobuzsync_favorite_toggle(qobuz_id, want, qobuz_fav_done, NULL);
+		update_fav_button();
+		return;
+	}
+
+	long tidal_id = tidalcache_track_id(state.current_file);
+	if (tidal_id > 0) {
+		bool want = !tidalsync_is_favorite(tidal_id);
+		tidalsync_favorite_toggle(tidal_id, want, tidal_fav_done, NULL);
+		update_fav_button();
+		return;
+	}
+
+	const char *slash = strrchr(state.current_file, '/');
+	const char *title = state.metadata.title[0] ? state.metadata.title : (slash ? slash + 1 : state.current_file);
+	library_fav_toggle(state.current_file, title, state.metadata.artist);
+	update_fav_button();
+}
+
+static void update_transport_modes(void) {
+	playback_mode_t mode = playlist_get_mode();
+	if (mode == PLAYBACK_MODE_SHUFFLE || mode == PLAYBACK_MODE_SHUFFLE_REPEAT) {
+		shuffle_remembered = true;
+	} else if (mode != PLAYBACK_MODE_REPEAT_ONE) {
+		shuffle_remembered = false;
+	}
+
+	bool shuf_on = (mode == PLAYBACK_MODE_SHUFFLE || mode == PLAYBACK_MODE_SHUFFLE_REPEAT ||
+					(mode == PLAYBACK_MODE_REPEAT_ONE && shuffle_remembered));
+	bool rep_all = (mode == PLAYBACK_MODE_REPEAT_ALL || mode == PLAYBACK_MODE_SHUFFLE_REPEAT);
+	bool rep_one = (mode == PLAYBACK_MODE_REPEAT_ONE);
+
+	if (shuffle_btn_icon) {
+		lv_obj_set_style_image_recolor(shuffle_btn_icon, shuf_on ? pal_cur.accent : pal_cur.text_secondary, 0);
+		lv_obj_set_style_image_recolor_opa(shuffle_btn_icon, LV_OPA_COVER, 0);
+		lv_obj_set_style_image_opa(shuffle_btn_icon, shuf_on ? LV_OPA_COVER : LV_OPA_60, 0);
+	}
+	if (shuffle_dot) {
+		lv_obj_set_style_bg_color(shuffle_dot, pal_cur.accent, 0);
+		lv_obj_set_hidden(shuffle_dot, !shuf_on);
+	}
+
+	if (repeat_btn_icon) {
+		const lv_image_dsc_t *ricon = rep_one ? &icon_repeat_one : &icon_repeat_all;
+		if (lv_image_get_src(repeat_btn_icon) != ricon) {
+			lv_image_set_src(repeat_btn_icon, ricon);
+		}
+		bool rep_active = rep_all || rep_one;
+		lv_obj_set_style_image_recolor(repeat_btn_icon, rep_active ? pal_cur.accent : pal_cur.text_secondary, 0);
+		lv_obj_set_style_image_recolor_opa(repeat_btn_icon, LV_OPA_COVER, 0);
+		lv_obj_set_style_image_opa(repeat_btn_icon, rep_active ? LV_OPA_COVER : LV_OPA_60, 0);
+	}
+	if (repeat_dot) {
+		lv_obj_set_style_bg_color(repeat_dot, pal_cur.accent, 0);
+		lv_obj_set_hidden(repeat_dot, !(rep_all || rep_one));
+	}
+}
+
+static void shuffle_btn_event_cb(lv_event_t *e) {
+	(void)e;
+	if (player_sheet_drag_active() || switcher_back_drag_active()) {
+		return;
+	}
+	playback_mode_t mode = playlist_get_mode();
+	bool endless = config_get_bool("player", "endless_shuffle", false);
+	if (mode == PLAYBACK_MODE_SHUFFLE || mode == PLAYBACK_MODE_SHUFFLE_REPEAT) {
+		shuffle_remembered = false;
+		playlist_set_mode(mode == PLAYBACK_MODE_SHUFFLE_REPEAT ? PLAYBACK_MODE_REPEAT_ALL : PLAYBACK_MODE_NORMAL);
+	} else if (mode == PLAYBACK_MODE_REPEAT_ONE) {
+		shuffle_remembered = !shuffle_remembered;
+	} else if (mode == PLAYBACK_MODE_REPEAT_ALL) {
+		shuffle_remembered = true;
+		playlist_set_mode(PLAYBACK_MODE_SHUFFLE_REPEAT);
+	} else {
+		shuffle_remembered = true;
+		playlist_set_mode(endless ? PLAYBACK_MODE_SHUFFLE_REPEAT : PLAYBACK_MODE_SHUFFLE);
+	}
+	update_transport_modes();
+	upnext_refresh();
+	carousel_sync_adjacent_requests();
+	device_state_queue_changed();
+}
+
+static void repeat_btn_event_cb(lv_event_t *e) {
+	(void)e;
+	if (player_sheet_drag_active() || switcher_back_drag_active()) {
+		return;
+	}
+	playback_mode_t mode = playlist_get_mode();
+	switch (mode) {
+	case PLAYBACK_MODE_NORMAL:
+		playlist_set_mode(PLAYBACK_MODE_REPEAT_ALL);
+		break;
+	case PLAYBACK_MODE_REPEAT_ALL:
+		shuffle_remembered = false;
+		playlist_set_mode(PLAYBACK_MODE_REPEAT_ONE);
+		break;
+	case PLAYBACK_MODE_SHUFFLE:
+		playlist_set_mode(PLAYBACK_MODE_SHUFFLE_REPEAT);
+		break;
+	case PLAYBACK_MODE_SHUFFLE_REPEAT:
+		shuffle_remembered = true;
+		playlist_set_mode(PLAYBACK_MODE_REPEAT_ONE);
+		break;
+	case PLAYBACK_MODE_REPEAT_ONE:
+	default:
+		playlist_set_mode(shuffle_remembered ? PLAYBACK_MODE_SHUFFLE : PLAYBACK_MODE_NORMAL);
+		break;
+	}
+	update_transport_modes();
+	upnext_refresh();
+	carousel_sync_adjacent_requests();
+	device_state_queue_changed();
+}
+
+static bool speed_is_podcast(void) {
+	return podcast_mode && !audiobook_mode;
+}
+
+static int speed_current_permille(void) {
+	return speed_is_podcast() ? podcast_speed_permille() : audiobook_speed_permille();
+}
+
+static void update_speed_button(void) {
+	if (!speed_btn_icon) {
+		return;
+	}
+	bool normal = speed_current_permille() == AUDIOBOOK_SPEED_NORMAL;
+	lv_obj_set_style_image_recolor(speed_btn_icon, normal ? pal_cur.text_secondary : pal_cur.accent, 0);
+	lv_obj_set_style_image_recolor_opa(speed_btn_icon, LV_OPA_COVER, 0);
+	lv_obj_set_style_image_opa(speed_btn_icon, normal ? LV_OPA_70 : LV_OPA_COVER, 0);
+}
+
+static void speed_pick(void *user) {
+	int permille = (int)(intptr_t)user;
+	if (speed_is_podcast()) {
+		podcast_set_speed_permille(permille);
+		permille = podcast_speed_permille();
+	} else {
+		audiobook_set_speed_permille(permille);
+		permille = audiobook_speed_permille();
+	}
+	audio_set_speed((double)permille / 1000.0);
+	update_speed_button();
+}
+
+static void speed_btn_event_cb(lv_event_t *e) {
+	if (player_sheet_drag_active() || switcher_back_drag_active()) {
+		return;
+	}
+	static const int CHOICES[] = {500, 750, 1000, 1250, 1500, 1750, 2000};
+	static const char *const LABELS[] = {"0.5x", "0.75x", "1.0x", "1.25x", "1.5x", "1.75x", "2.0x"};
+	enum { CHOICE_COUNT = sizeof(CHOICES) / sizeof(CHOICES[0]) };
+
+	popover_item_t items[CHOICE_COUNT] = {0};
+	int current = speed_current_permille();
+	for (int i = 0; i < CHOICE_COUNT; i++) {
+		items[i].label = LABELS[i];
+		items[i].action = speed_pick;
+		items[i].user = (void *)(intptr_t)CHOICES[i];
+		items[i].checked = (CHOICES[i] == current);
+	}
+	popover_show(lv_event_get_current_target(e), items, CHOICE_COUNT);
+}
+
+// ---------------------------------------------------------------------------
+// Queue Position & Bottom Shortcuts Row
+// ---------------------------------------------------------------------------
+
 bool player_queue_position(int *position, int *count) {
 	*position = 0;
 	*count = 0;
 	if (live_mode) {
-		int index;
-		int total;
+		int index, total;
 		if (live_custom_nav && radio_list_position(&index, &total)) {
 			*position = index + 1;
 			*count = total;
@@ -796,687 +2145,260 @@ bool player_queue_position(int *position, int *count) {
 	return true;
 }
 
-static void update_queue_position(void) {
-	if (!queue_position_label) {
-		return;
-	}
-
-	if (live_mode) {
-		int index;
-		int count;
-		if (live_custom_nav && radio_list_position(&index, &count)) {
-			lv_label_set_text_fmt(queue_position_label, "%d/%d", index + 1, count);
-		} else {
-			lv_label_set_text(queue_position_label, "");
+static void update_queue_and_shortcuts(void) {
+	// Lyrics shortcut pill state
+	if (lyrics_shortcut_btn && lyrics_shortcut_icon && lyrics_shortcut_label) {
+		bool in_int = (lyrics_state == LYRICS_VIEW_INTEGRATED);
+		const lv_image_dsc_t *ic = in_int ? &icon_album_small : &icon_lyrics;
+		if (lv_image_get_src(lyrics_shortcut_icon) != ic) {
+			lv_image_set_src(lyrics_shortcut_icon, ic);
 		}
-		return;
+		set_label_text_if_changed(lyrics_shortcut_label, tr(in_int ? "lyrics_artwork" : "lyrics"));
+		lv_color_t fg = in_int ? pal_cur.accent : pal_cur.text_secondary;
+		lv_obj_set_style_image_recolor(lyrics_shortcut_icon, fg, 0);
+		lv_obj_set_style_image_recolor_opa(lyrics_shortcut_icon, LV_OPA_COVER, 0);
+		lv_obj_set_style_text_color(lyrics_shortcut_label, fg, 0);
+		lv_obj_set_style_bg_color(lyrics_shortcut_btn, pal_cur.surface, 0);
+		lv_obj_set_style_bg_opa(lyrics_shortcut_btn, in_int ? LV_OPA_COVER : LV_OPA_TRANSP, 0);
+		lv_obj_set_hidden(lyrics_shortcut_btn, live_mode || audiobook_mode);
 	}
 
-	int count = playlist_count();
-	int index = playlist_current_index();
-	bool worth_saying = count > 1 && index >= 0 && !audiobook_mode && !dlna_owns_playback();
-
-	if (!worth_saying) {
-		lv_label_set_text(queue_position_label, "");
-		return;
+	// Queue shortcut pill state
+	if (queue_shortcut_btn && queue_shortcut_icon && queue_shortcut_label) {
+		int pos = 0, total = 0;
+		char qtxt[64];
+		if (player_queue_position(&pos, &total)) {
+			snprintf(qtxt, sizeof(qtxt), "%d / %d", pos, total);
+		} else {
+			snprintf(qtxt, sizeof(qtxt), "%s", tr("queue"));
+		}
+		set_label_text_if_changed(queue_shortcut_label, qtxt);
+		lv_obj_set_style_image_recolor(queue_shortcut_icon, pal_cur.text_secondary, 0);
+		lv_obj_set_style_image_recolor_opa(queue_shortcut_icon, LV_OPA_COVER, 0);
+		lv_obj_set_style_text_color(queue_shortcut_label, pal_cur.text_secondary, 0);
+		lv_obj_set_hidden(queue_shortcut_btn, live_mode || audiobook_mode || dlna_owns_playback());
 	}
-	lv_label_set_text_fmt(queue_position_label, "%d/%d", (int)playlist_current_entry() + 1, count);
+
+	// Compact unobtrusive Up Next one-line bearing in center of bottom strip
+	if (upnext_bearing_btn && upnext_bearing_label) {
+		char next_title[256] = "";
+		bool rep_one = false;
+		if (!live_mode && !audiobook_mode && lyrics_state == LYRICS_VIEW_NONE &&
+			upnext_get_auto(next_title, sizeof(next_title), NULL, 0, &rep_one) && next_title[0] && !rep_one) {
+			char bearing[300];
+			snprintf(bearing, sizeof(bearing), "%s · %s", tr("up_next"), next_title);
+			set_label_text_if_changed(upnext_bearing_label, bearing);
+			lv_obj_set_style_text_color(upnext_bearing_label, pal_cur.text_secondary, 0);
+			lv_obj_set_style_text_opa(upnext_bearing_label, LV_OPA_70, 0);
+			lv_obj_set_hidden(upnext_bearing_btn, false);
+		} else {
+			lv_obj_set_hidden(upnext_bearing_btn, true);
+		}
+	}
 }
 
-// Works out view_start and view_length for playback at `position` in a file
-// `total` seconds long. Asked on every poll rather than at a chapter change:
-// a seek, a skip or the book simply playing on moves into another chapter, and
-// nothing has to be told.
-static void view_update(double position, double total) {
-	view_start = 0;
-	view_length = total > 0 ? total : 0;
-	if (view_length <= 0 || !audiobook_mode || !audiobook_has_chapters || !audiobook_duration_per_chapter()) {
+static void on_upnext_resolved(void) {
+	carousel_sync_adjacent_requests();
+	update_queue_and_shortcuts();
+}
+
+// ---------------------------------------------------------------------------
+// Live Radio & Audiobook Mode Switching
+// ---------------------------------------------------------------------------
+
+static void apply_connecting(void) {
+	bool connecting = radio_is_connecting();
+	if (connecting == connecting_shown) {
 		return;
 	}
+	connecting_shown = connecting;
+	lv_obj_t *const buttons[] = {play_btn, prev_btn_obj, next_btn_obj, fs_play_btn, fs_prev_btn, fs_next_btn};
+	for (size_t i = 0; i < sizeof(buttons) / sizeof(buttons[0]); i++) {
+		if (!buttons[i]) continue;
+		if (connecting) {
+			lv_obj_add_state(buttons[i], LV_STATE_DISABLED);
+		} else {
+			lv_obj_remove_state(buttons[i], LV_STATE_DISABLED);
+		}
+	}
+}
+
+static void apply_live_mode(bool live) {
+	bool custom_nav = live && radio_can_step();
+	bool transport_hidden = live && !custom_nav;
+
+	if (live == live_mode && transport_hidden == live_transport_hidden && custom_nav == live_custom_nav &&
+		cslots[1].placeholder) {
+		return;
+	}
+	live_mode = live;
+	live_transport_hidden = transport_hidden;
+	live_custom_nav = custom_nav;
+
+	if (live && lyrics_state != LYRICS_VIEW_NONE) {
+		lyrics_set_mode(LYRICS_VIEW_NONE, false);
+	}
+
+	lv_obj_t *const hidden_when_live[] = {more_btn_obj, shuffle_btn_obj, repeat_btn_obj, wave_box, elapsed_label,
+										  remaining_label};
+	for (size_t i = 0; i < sizeof(hidden_when_live) / sizeof(hidden_when_live[0]); i++) {
+		if (hidden_when_live[i]) {
+			lv_obj_set_hidden(hidden_when_live[i], live);
+		}
+	}
+
+	lv_obj_t *const transport[] = {prev_btn_obj, next_btn_obj};
+	for (size_t i = 0; i < sizeof(transport) / sizeof(transport[0]); i++) {
+		if (transport[i]) {
+			lv_obj_set_hidden(transport[i], transport_hidden);
+		}
+	}
+
+	sync_header_title();
+	update_service_badges();
+	refresh_cover_placeholders();
+	update_queue_and_shortcuts();
+}
+
+static void apply_audiobook_mode(bool book, bool podcast) {
+	bool chapters = book && (audiobook_chapter_count() > 0 || audiobook_part_count() > 1);
+	bool skips = book || podcast;
+	int back = (podcast && !book) ? podcast_skip_back() : audiobook_skip_back();
+	int forward = (podcast && !book) ? podcast_skip_forward() : audiobook_skip_forward();
+
+	if (audiobook_mode_valid && book == audiobook_mode && podcast == podcast_mode &&
+		chapters == audiobook_has_chapters && back == audiobook_skip_shown_back &&
+		forward == audiobook_skip_shown_forward) {
+		return;
+	}
+	audiobook_mode = book;
+	podcast_mode = podcast;
+	audiobook_has_chapters = chapters;
+	audiobook_skip_shown_back = back;
+	audiobook_skip_shown_forward = forward;
+	audiobook_mode_valid = true;
+
+	if (book && lyrics_state != LYRICS_VIEW_NONE) {
+		lyrics_set_mode(LYRICS_VIEW_NONE, false);
+	}
+
+	const lv_image_dsc_t *p_ic = !skips                            ? &icon_skip_back
+								 : back == AUDIOBOOK_SKIP_HUGE ? &icon_prev_60
+								 : back == AUDIOBOOK_SKIP_LONG ? &icon_prev_30
+															   : &icon_prev_10;
+	const lv_image_dsc_t *n_ic = !skips                               ? &icon_skip_forward
+								 : forward == AUDIOBOOK_SKIP_HUGE ? &icon_next_60
+								 : forward == AUDIOBOOK_SKIP_LONG ? &icon_next_30
+																  : &icon_next_10;
+	if (prev_icon) lv_image_set_src(prev_icon, p_ic);
+	if (next_icon) lv_image_set_src(next_icon, n_ic);
+	if (fs_prev_icon) lv_image_set_src(fs_prev_icon, p_ic);
+	if (fs_next_icon) lv_image_set_src(fs_next_icon, n_ic);
+
+	if (more_btn_icon) {
+		lv_image_set_src(more_btn_icon, (podcast && !book) ? &icon_podcast_episodes : &icon_ellipsis_vertical);
+	}
+	if (fav_btn_obj) {
+		lv_obj_set_hidden(fav_btn_obj, book);
+	}
+	if (shuffle_btn_obj) {
+		lv_obj_set_hidden(shuffle_btn_obj, book || podcast || live_mode);
+	}
+	if (repeat_btn_obj) {
+		lv_obj_set_hidden(repeat_btn_obj, book || podcast || live_mode);
+	}
+	if (speed_btn_obj) {
+		lv_obj_set_hidden(speed_btn_obj, !(book || podcast));
+		if (book || podcast) {
+			update_speed_button();
+		}
+	}
+
+	sync_header_title();
+	refresh_cover_placeholders();
+	update_queue_and_shortcuts();
+}
+
+static double current_chapter_end(double position) {
 	int index = audiobook_chapter_at(position);
+	if (index < 0) return 0;
 	double start = 0;
-	if (index < 0 || !audiobook_chapter(index, NULL, 0, &start)) {
-		return;
-	}
-	double end = total;
-	if (!audiobook_chapter(index + 1, NULL, 0, &end) || end > total) {
-		end = total; // the last chapter ends where the file does
-	}
-	if (start < 0 || end - start < 1.0) {
-		return; // a mark with nothing after it: the whole file is the better answer
-	}
-	view_start = start;
-	view_length = end - start;
+	if (!audiobook_chapter(index + 1, NULL, 0, &start)) return 0;
+	return start;
 }
 
-// Where `position` sits along the bar, 0 to 1000, the slider's range.
-static int view_value(double position) {
-	if (view_length <= 0) {
-		return 0;
+static void pause_book_at(double seconds) {
+	device_state_seek(seconds);
+	if (audio_get_status() == AUDIO_STATUS_PLAYING) {
+		audiobook_suppress_rewind_once();
+		device_state_toggle_play_pause();
 	}
-	double fraction = (position - view_start) / view_length;
-	if (fraction < 0) {
-		fraction = 0;
-	}
-	if (fraction > 1) {
-		fraction = 1;
-	}
-	return (int)(fraction * 1000);
+	audiobook_note_position(seconds, 0, true);
 }
 
-// The other way round: the second of the file that slider value `value` is.
-static double view_seconds(int value) { return view_start + view_length * value / 1000.0; }
-
-// Writes the two clocks that sit under the ends of the progress bar: elapsed
-// on the left, total length on the right -- both of the file, or both of the
-// chapter (see view_start).
-static void set_progress_label(double current_secs, double total_secs) {
-	view_update(current_secs, total_secs);
-	double shown = 0;
-	if (view_length > 0) {
-		lv_slider_set_value(progress_slider, view_value(current_secs), LV_ANIM_OFF);
-		shown = current_secs - view_start;
-		if (shown < 0) {
-			shown = 0;
-		}
+static bool audiobook_auto_stop(const device_state_t *state) {
+	if (state->status != AUDIO_STATUS_PLAYING || !audiobook_stop_at_chapter_end()) {
+		return false;
 	}
-
-	formatDoubleSeconds(shown, progress_label_text, sizeof(progress_label_text));
-	lv_label_set_text(elapsed_label, progress_label_text);
-
-	formatDoubleSeconds(view_length, progress_label_text, sizeof(progress_label_text));
-	lv_label_set_text(remaining_label, progress_label_text);
-
-	// Written from here because this is the one place that runs on every poll
-	// and on every track change, which is exactly when the answer can move.
-	update_queue_position();
+	double end = current_chapter_end(state->progress_current_secs);
+	if (end > 0 && state->progress_current_secs >= end - 0.5) {
+		pause_book_at(end);
+		return true;
+	}
+	return false;
 }
 
-// True while a decode is in flight at the worker.
-static bool cover_request_outstanding;
-
-// What the artwork on screen IS, as cover_source_id() reports it, so the next
-// track can be asked "the same picture?" before anything is thrown away. 0 when
-// it is not known -- the answer has not come back yet, or there is no artwork.
-static uint64_t cover_shown_id;
-
-// The id of the picture now being decoded, when it was already known before the
-// decode was asked for. Saves hashing the same file twice.
-static uint64_t cover_incoming_id;
-
-// Hashing never happens on this thread: it reads the picture out of the file,
-// which is the work the loader exists to keep off the interface. So there is a
-// question outstanding, and two reasons to have asked it.
-static enum {
-	COVER_ID_IDLE,
-	COVER_ID_NEW_TRACK, // is the next track's picture the one already up?
-	COVER_ID_MEASURE,   // what is the picture that just went up?
-} cover_id_state;
-
-// How often the loader's answers are looked for while one is outstanding. The
-// progress poll comes round only every half second (two seconds when paused),
-// and a track change asks twice -- what the picture is, then the picture -- so
-// waiting for it added up to a second, or four, on top of the work itself.
-// This timer runs only while a question is out and stops itself after.
-#define COVER_POLL_MS 30
-static lv_timer_t *cover_poll_timer;
-static void cover_poll_start(void);
-static void prefetch_next_cover(void);
-
-// With artwork loaded the controls sit on the always-dark blurred backdrop,
-// so the chrome -- titles, clocks, transport glyphs, the chevron -- must be
-// light in both themes. Local style props are laid over the theme styles
-// while the cover is up, and removed again when it goes, so the plain
-// no-cover panel keeps following the theme.
-// The picture at the width of the screen, and the note that stands in for it.
-//
-// One place, because Studio hides both -- the sleeve there is a smaller picture
-// of its own over the blurred copy -- and the artwork arrives on a worker, so
-// whatever the arrangement did when it was set up would be undone the moment a
-// cover landed.
-static void cover_show(bool have_cover) {
-	if (!cover_img) {
-		return;
+static void audiobook_seek_by(double delta, const device_state_t *state) {
+	double target = state->progress_current_secs + delta;
+	if (target < 0) target = 0;
+	double length = state->progress_total_secs > 0 ? state->progress_total_secs : current_total_length;
+	if (length > 1.0 && target > length - 1.0) {
+		target = length - 1.0;
 	}
-	bool studio = layout_studio_now;
-	if (have_cover && !studio) {
-		lv_obj_set_hidden(cover_img, false);
-	} else {
-		lv_obj_set_hidden(cover_img, true);
-	}
-	if (!cover_placeholder_icon) {
-		return;
-	}
-	if (!have_cover && !studio) {
-		lv_obj_set_hidden(cover_placeholder_icon, false);
-	} else {
-		lv_obj_set_hidden(cover_placeholder_icon, true);
-	}
+	device_state_seek(target);
+	audiobook_note_position(target, length, true);
 }
 
-static void set_over_cover(bool on) {
-	chrome_over_cover = on;
+static void apply_playback_status(audio_status_t status) {
+	bool playing = (status == AUDIO_STATUS_PLAYING);
+	const lv_image_dsc_t *glyph = radio_is_connecting() ? &icon_loader_small
+								  : playing             ? (live_mode ? &icon_stop : &icon_pause)
+														: &icon_play;
+	if (play_btn_icon && lv_image_get_src(play_btn_icon) != glyph) {
+		lv_image_set_src(play_btn_icon, glyph);
+	}
+	if (fs_play_icon && lv_image_get_src(fs_play_icon) != glyph) {
+		lv_image_set_src(fs_play_icon, glyph);
+	}
 
-	lv_obj_t *const text_objs[] = {song_title_label, elapsed_label, remaining_label};
-	lv_obj_t *const dim_objs[] = {song_artist_label, format_label, queue_position_label};
-	lv_obj_t *const icon_objs[] = {prev_icon, next_icon};
+	if (playing) {
+		polls_since_stop = 0;
+	} else if (polls_since_stop < POLLS_FAST_AFTER_STOP) {
+		polls_since_stop++;
+	}
 
-	for (size_t i = 0; i < sizeof(text_objs) / sizeof(text_objs[0]); i++) {
-		if (!text_objs[i]) {
-			continue;
-		}
-		if (on) {
-			lv_obj_set_style_text_color(text_objs[i], lv_color_white(), 0);
+	bool settling = polls_since_stop < POLLS_FAST_AFTER_STOP;
+	if (progress_slider_timer) {
+		lv_timer_set_period(progress_slider_timer, (playing || settling) ? POLL_PERIOD_PLAYING_MS : POLL_PERIOD_IDLE_MS);
+		lv_timer_resume(progress_slider_timer);
+	}
+
+	topbar_refresh_playback();
+
+	sleeptimer_note_playing(playing ? sleeptimer_kind_playing() : SLEEPTIMER_COUNT);
+	if (sleep_timer) {
+		if (sleeptimer_any_running()) {
+			lv_timer_resume(sleep_timer);
 		} else {
-			lv_obj_remove_local_style_prop(text_objs[i], LV_STYLE_TEXT_COLOR, 0);
+			lv_timer_pause(sleep_timer);
 		}
 	}
-	for (size_t i = 0; i < sizeof(dim_objs) / sizeof(dim_objs[0]); i++) {
-		if (!dim_objs[i]) {
-			continue;
-		}
-		if (on) {
-			lv_obj_set_style_text_color(dim_objs[i], lv_color_make(200, 200, 200), 0);
-		} else {
-			lv_obj_remove_local_style_prop(dim_objs[i], LV_STYLE_TEXT_COLOR, 0);
-		}
-	}
-	for (size_t i = 0; i < sizeof(icon_objs) / sizeof(icon_objs[0]); i++) {
-		if (!icon_objs[i]) {
-			continue;
-		}
-		if (on) {
-			lv_obj_set_style_image_recolor(icon_objs[i], lv_color_white(), 0);
-			lv_obj_set_style_image_recolor_opa(icon_objs[i], LV_OPA_COVER, 0);
-		} else {
-			lv_obj_remove_local_style_prop(icon_objs[i], LV_STYLE_IMAGE_RECOLOR, 0);
-			lv_obj_remove_local_style_prop(icon_objs[i], LV_STYLE_IMAGE_RECOLOR_OPA, 0);
-		}
-	}
-
-	// The disc: white over artwork and in the dark theme, where white reads
-	// as the brightest thing on screen. The one case it has to go dark is the
-	// light theme with no cover -- a white disc on a near-white panel is
-	// invisible.
-	if (play_btn) {
-		bool white_disc = on || theme()->dark;
-		lv_obj_set_style_bg_color(play_btn, white_disc ? lv_color_white() : theme()->surface_pressed, 0);
-		lv_obj_set_style_bg_opa(play_btn, LV_OPA_COVER, 0);
-	}
-	if (play_btn_icon) {
-		lv_obj_set_style_image_recolor(play_btn_icon, chrome_accent(), 0);
-		lv_obj_set_style_image_recolor_opa(play_btn_icon, LV_OPA_COVER, 0);
-	}
-
-	// The floating chevron parks over the artwork's top-left corner.
-	back_btn_over_cover(on);
-}
-
-// Told before the loaded track's artwork is freed. The screensaver borrows
-// those pixels and can still be up behind a blanked panel when a track
-// changes, so it has to let go first.
-static void (*cover_release_cb)(void);
-
-void player_set_cover_release_cb(void (*cb)(void)) { cover_release_cb = cb; }
-
-void player_cover_box(int *w, int *h) {
-	if (w) {
-		*w = cover_box_w;
-	}
-	if (h) {
-		*h = cover_box_h;
-	}
-}
-
-bool player_cover_copy(int size, cover_image_t *out, uint64_t *id) {
-	*id = 0;
-	// Only a settled cover: while one is coming, or a track change is still
-	// asking whether its picture is the same, what is up may be the last
-	// track's.
-	if (!current_cover.pixels || cover_request_outstanding || cover_id_state != COVER_ID_IDLE) {
-		return false;
-	}
-	if (!cover_scaled_copy(&current_cover, size, out)) {
-		return false;
-	}
-	*id = cover_shown_id;
-	return true;
-}
-
-// The path whose artwork is currently up. A live stream refreshes its text
-// several times a minute (every new on-air title), and re-decoding the same
-// station icon each time would be pointless work on the UI thread.
-static char cover_shown_path[512];
-
-static void reload_cover(const char *filepath);
-
-// Shows the placeholder and asks the worker for the album art of `filepath`.
-// Nothing is read or decoded here: on the X1600E that work is seconds long,
-// and doing it on this thread at every track change -- including the automatic
-// one when a song ends -- froze whatever the user was doing at that moment,
-// the file browser most of all. The finished pictures are collected by
-// apply_cover_result(), from cover_poll_cb() and the progress timer tick.
-// Rec. 601 luma, which is what "how bright does this look" means to an eye and
-// not to a sum of three channels.
-static int luma_of(int r, int g, int b) { return (r * 299 + g * 587 + b * 114) / 1000; }
-
-// The sleeve's colour with its strength cut to `sat` per cent of the distance
-// from grey and its brightness moved to `want`. Darkening is a plain ratio, so
-// no channel can clip; brightening walks each channel the same fraction of the
-// way to white, which keeps the hue where it was.
-static lv_color_t tone_shaped(int sat, int want) {
-	uint32_t raw = album_tone;
-	if (!raw) {
-		lv_color_t accent = theme()->accent;
-		raw = ((uint32_t)accent.red << 16) | ((uint32_t)accent.green << 8) | accent.blue;
-	}
-	int r = (int)((raw >> 16) & 0xFF), g = (int)((raw >> 8) & 0xFF), b = (int)(raw & 0xFF);
-
-	int grey = luma_of(r, g, b);
-	r = grey + (r - grey) * sat / 100;
-	g = grey + (g - grey) * sat / 100;
-	b = grey + (b - grey) * sat / 100;
-
-	int luma = luma_of(r, g, b);
-	if (luma > want && luma > 0) {
-		r = r * want / luma;
-		g = g * want / luma;
-		b = b * want / luma;
-	} else if (luma < want && luma < 255) {
-		int step = (want - luma) * 255 / (255 - luma);
-		r += (255 - r) * step / 255;
-		g += (255 - g) * step / 255;
-		b += (255 - b) * step / 255;
-	}
-	return lv_color_make((uint8_t)r, (uint8_t)g, (uint8_t)b);
-}
-
-// What the pills and the disc are filled with, and what the waveform is drawn
-// in. Cover Flow throws the same hue under the record in the middle, which is
-// what makes the two pages look like they belong to the same player.
-static lv_color_t alt_surface(void) { return tone_shaped(ALT_SURFACE_SAT, ALT_SURFACE_LUMA); }
-static lv_color_t alt_mark(void) { return tone_shaped(ALT_MARK_SAT, ALT_MARK_LUMA); }
-
-// The accent the transport, the progress bar and the sung line wear: the
-// sleeve's colour in the Waveform arrangement, and in the other two as well
-// when the setting asks for it and there is a sleeve to take it from. The same
-// shade in all three, light enough to read over the dark backdrop every
-// arrangement puts behind a sleeve.
-static lv_color_t chrome_accent(void) {
-	if (layout_wave_now || (cover_accent && album_tone)) {
-		return alt_mark();
-	}
-	return theme()->accent;
-}
-
-// The type on that surface. Worked out rather than fixed so that a change to
-// ALT_SURFACE_LUMA cannot quietly leave the title unreadable.
-static lv_color_t alt_ink(void) {
-	lv_color_t s = alt_surface();
-	return luma_of(s.red, s.green, s.blue) > 140 ? lv_color_hex(0x1A1A1A) : lv_color_white();
-}
-
-static void lyrics_repaint_lit(void);
-
-// The two glyphs that wear the accent, repainted whenever the accent of the
-// moment can have moved: the play/pause disc and the repeat/shuffle mode.
-static void paint_transport_tint(void) {
-	if (play_btn_icon) {
-		lv_obj_set_style_image_recolor(play_btn_icon, chrome_accent(), 0);
-		lv_obj_set_style_image_recolor_opa(play_btn_icon, LV_OPA_COVER, 0);
-	}
-	if (repeat_btn_icon) {
-		update_repeat_button();
-	}
-	update_speed_button();
-	// The progress bar, which Waveform hides under the shape of the track.
-	if (progress_slider) {
-		lv_obj_set_style_bg_color(progress_slider, chrome_accent(), LV_PART_INDICATOR);
-		lv_obj_set_style_bg_color(progress_slider, chrome_accent(), LV_PART_KNOB);
-	}
-	lyrics_repaint_lit(); // the sung line wears it too
-}
-
-// Hides the artist's pill when there is no artist. An empty pill is a blank
-// lozenge sitting on the sleeve for no reason, and a stream between titles has
-// no artist for seconds at a time.
-static void alt_pills_sync(void) {
-	if (!alt_artist_pill || !song_artist_label) {
-		return;
-	}
-	const char *artist = lv_label_get_text(song_artist_label);
-	if (artist && artist[0]) {
-		lv_obj_set_hidden(alt_artist_pill, false);
-	} else {
-		lv_obj_set_hidden(alt_artist_pill, true);
-	}
-}
-
-// Puts the sleeve's colour on everything the alternative layout tints -- and,
-// in the standard layout, takes it off again. That second half is the point:
-// these are local style properties on widgets the two arrangements share, so
-// leaving them behind painted the standard page in the last sleeve's ink.
-static void paint_alt_tint(void) {
-	if (!alt_title_pill) {
-		return;
-	}
-
-	if (!layout_alt_now) {
-		if (song_artist_label) {
-			lv_obj_remove_local_style_prop(song_artist_label, LV_STYLE_TEXT_OPA, 0);
-		}
-		// And the title and the artist go back to being whatever the page they
-		// are on says they are. Asked of the one function that knows -- the
-		// colour depends on whether there is artwork behind them, not on the
-		// theme alone, and a second copy of that rule here would be a second
-		// place for it to go out of date.
-		set_over_cover(chrome_over_cover);
-		update_fav_button(); // which owns the star's colour in both arrangements
-		paint_transport_tint();
-		wave_drawn = -1;
-		return;
-	}
-
-	lv_color_t surface = alt_surface();
-	lv_color_t ink = alt_ink();
-
-	lv_obj_set_style_bg_color(alt_title_pill, surface, 0);
-	lv_obj_set_style_bg_color(alt_artist_pill, surface, 0);
-	lv_obj_set_style_bg_color(alt_fav_circle, surface, 0);
-
-	if (song_title_label) {
-		lv_obj_set_style_text_color(song_title_label, ink, 0);
-	}
-	if (song_artist_label) {
-		lv_obj_set_style_text_color(song_artist_label, ink, 0);
-		lv_obj_set_style_text_opa(song_artist_label, LV_OPA_80, 0);
-	}
-	update_fav_button();
-	alt_pills_sync();
-	paint_transport_tint();
-
-	wave_drawn = -1; // the bars are the old colour
-}
-
-// Whether what is playing is an ordinary file on the card.
-//
-// Asked of the state and the caches rather than of a flag raised at the start,
-// for the reason written at apply_audiobook_mode(): a flag has to be cleared on
-// every route by which the track can change, and the first route forgotten
-// leaves the player dressed as the wrong thing.
-//
-// Everything that is not a file on the card is somebody else's audio passing
-// through: the radio has no length, Qobuz, Tidal, a podcast and a phone pushing
-// over DLNA all play out of a cache folder that is emptied behind them, and
-// AirPlay does not go through the decoder at all -- during an AirPlay session
-// `current_file` still names whatever local track was loaded last, so it has to
-// be asked separately rather than inferred from the path.
-//
-// An audiobook is the one exception that IS a file on the card. It is left out
-// anyway: the page is already dressed as a book -- chapters instead of a queue,
-// skips instead of tracks, no star -- and none of what the alternative
-// arrangement adds means anything to one. A shape drawn across nine hours of
-// speech is a flat stripe, and the nine hours would have to be decoded to find
-// that out.
-static bool playing_local_file(const device_state_t *state) {
-	if (state->live || !state->current_file[0] || audiobook_is_playing()) {
-		return false;
-	}
-	airplay_state_t air;
-	airplay_get_state(&air);
-	if (air.playing) {
-		return false;
-	}
-	const char *f = state->current_file;
-	return !qobuzcache_owns(f) && !tidalcache_owns(f) && !podcastcache_is_episode(f) && !dlna_owns_path(f) &&
-		   !dlna_owns_playback();
-}
-
-// Puts the progress slider over the waveform, or back where it belongs.
-//
-// The slider is the only thing on the page that knows how to turn a finger into
-// a seek -- the waveform is a picture and nothing more -- so the alternative
-// layout must not hide it. It moves inside the waveform's box instead,
-// stretched over the whole of it so that a press anywhere on the bars is a
-// press on the slider, with every part of it drawn as nothing. What is seen is
-// the waveform; what is dragged is the slider.
-// Leaves the shape of the track, where the panel above it overlaps it, to the
-// slider laid over it.
-static void cover_panel_hit_test_cb(lv_event_t *e) {
-	lv_hit_test_info_t *info = lv_event_get_hit_test_info(e);
-	if (!info || !wave_box || lv_obj_is_hidden(wave_box)) {
-		return;
-	}
-	lv_area_t wave;
-	lv_obj_get_coords(wave_box, &wave);
-	const lv_point_t *p = info->point;
-	if (p->x >= wave.x1 && p->x <= wave.x2 && p->y >= wave.y1 && p->y <= wave.y2) {
-		info->res = false;
-	}
-}
-
-static void slider_over_waveform(bool over) {
-	if (!progress_slider) {
-		return;
-	}
-
-	if (over && wave_box) {
-		lv_obj_set_parent(progress_slider, wave_box);
-		lv_obj_set_size(progress_slider, lv_pct(100), WAVE_HEIGHT);
-		lv_obj_align(progress_slider, LV_ALIGN_CENTER, 0, 0);
-		lv_obj_set_style_bg_opa(progress_slider, LV_OPA_TRANSP, LV_PART_MAIN);
-		lv_obj_set_style_bg_opa(progress_slider, LV_OPA_TRANSP, LV_PART_INDICATOR);
-		lv_obj_set_style_opa(progress_slider, LV_OPA_TRANSP, LV_PART_KNOB);
-		lv_obj_move_foreground(progress_slider); // over the canvas, which takes no presses anyway
-		return;
-	}
-
-	if (lv_obj_get_parent(progress_slider) == wave_box) {
-		lv_obj_set_parent(progress_slider, player_menu);
-		lv_obj_move_to_index(progress_slider, lv_obj_get_index(wave_box) + 1);
-	}
-	lv_obj_set_size(progress_slider, lv_pct(100), PROGRESS_TRACK_HEIGHT);
-	lv_obj_remove_local_style_prop(progress_slider, LV_STYLE_BG_OPA, LV_PART_MAIN);
-	lv_obj_set_style_bg_opa(progress_slider, LV_OPA_30, LV_PART_MAIN);
-	lv_obj_remove_local_style_prop(progress_slider, LV_STYLE_BG_OPA, LV_PART_INDICATOR);
-	lv_obj_remove_local_style_prop(progress_slider, LV_STYLE_OPA, LV_PART_KNOB);
+	notify_state_cbs();
 }
 
 // ---------------------------------------------------------------------------
-// Studio: the sleeve in the middle, the blurred artwork behind the whole screen
-//
-// Nothing here is drawn by hand. The sleeve is the picture the page already
-// decoded, shown at the size this arrangement wants, and the background is the
-// blurred copy the page already makes for behind the controls, asked for at the
-// size of the whole screen instead. What this section owns is where they go and
-// when.
+// First-Class Lyrics Experience (Mode A Integrated & Mode B Full-Screen)
 // ---------------------------------------------------------------------------
-
-#define STUDIO_MARGIN 14	  // what the sleeve keeps to the side edges
-#define STUDIO_HEAD_H 78	  // the title, the artist and the ellipsis
-#define STUDIO_COVER_GAP 24	  // between the head and the top of the sleeve
-#define STUDIO_BADGE_GAP 6	  // between the head and the source mark under the ellipsis
-#define STUDIO_QUALITY_GAP 10 // between the sleeve and the line under it
-#define STUDIO_QUALITY_H 30
-#define STUDIO_BOTTOM 10 // under that line, before the controls begin
-#define STUDIO_COVER_MAX_PCT 83
-
-static lv_obj_t *studio_bg;		  // the blurred sleeve, the size of the screen
-static lv_obj_t *studio_box;	  // what everything else is laid out on
-static lv_obj_t *studio_head;	  // title and artist across the top
-static lv_obj_t *studio_text_col; // the two of them, stacked and centred
-static lv_obj_t *studio_cover;
-static lv_obj_t *studio_empty;		  // the square shown where a track has no artwork
-static lv_obj_t *studio_empty_icon;
-static lv_obj_t *studio_quality;	  // the icon and the format line under the sleeve
-static lv_obj_t *studio_quality_icon;
-static bool studio_up;
-static int studio_box_w, studio_box_h; // the panel this arrangement is laid out on
-static int menu_pad_ver = PLAYER_MENU_PAD_VER; // the controls block's spacing, see PLAYER_MENU_REF_HEIGHT
-static int menu_gap = PLAYER_MENU_GAP;
-static int studio_cover_size;
-
-// ---------------------------------------------------------------------------
-// Lyrics
-//
-// For a file on the card, a page of words beside the sleeve: a finger
-// drawing the artwork from right to left pulls the words in as the sleeve
-// goes out, and drawing them back from left to right brings the sleeve back.
-// The bar and the buttons stay exactly where they are. Everything else turns
-// into Studio's look as the words come in: the blurred sleeve behind the whole
-// screen, and the title and artist at the top. That blur is made in the
-// background as soon as the artwork arrives, so it is there before the first
-// swipe; Studio already has it, and there the words only take the sleeve's
-// place.
-//
-// Timed lyrics follow the music, the line being sung lit in the accent colour
-// and held in the middle of the column, the words moving up under it one line
-// at a time; a finger scrolling them takes over for a few seconds, and a tap
-// on a line plays from there. The column fades out at its top and bottom
-// edges the way a scrolling title does at its ends.
-//
-// The swipe is there on every file, words or not. On one without, it asks
-// whether to look for them on LRCLIB (lrclib.h); what is found is listed to
-// pick from (lyricsearch.h), the one picked is saved beside the file, and the
-// page comes in with it.
-// ---------------------------------------------------------------------------
-
-#define LYRICS_FADE_PX 56
-#define LYRICS_LINE_GAP 16
-#define LYRICS_DIM_OPA LV_OPA_40
-#define LYRICS_USER_HOLD_MS 4000
-#define LYRICS_STEP_MS 320 // one line moving up into the middle
-#define LYRICS_SLIDE_MS 220
-// The page comes or goes once the finger has carried it this fraction of the
-// way; short of it, it goes back.
-#define LYRICS_COMMIT_FRACTION 4
-#define LYRICS_DRAG_PX 10 // sideways past this, a swipe and not a tap
-// Behind the words on a track with no artwork: dark in either theme, since
-// the words are white.
-#define LYRICS_FULL 1000 // lyrics_progress with the page all the way in
-
-static bool lyrics_wanted;  // pulled in by a swipe
-static bool lyrics_allowed; // wanted, and a file on the card playing
-static bool lyrics_now;		// on screen: allowed, and the file has words
-static lv_obj_t *lyrics_pane; // the page: the column and the note
-static lv_obj_t *lyrics_head; // the title and artist at the top while the words are up
-static lv_obj_t *lyrics_head_col;
-static lv_obj_t *lyrics_head_title;
-static lv_obj_t *lyrics_head_artist;
-static cover_image_t lyrics_screen_pic; // the blurred sleeve at the shape of the screen
-static unsigned lyrics_bg_generation;
-static int32_t lyrics_progress; // 0 the sleeve, LYRICS_FULL the words
-// A line tapped: where it plays from, and until when the column waits for the
-// player to get there rather than follow the position from before the jump.
-static int32_t lyrics_tap_ms = -1;
-static uint32_t lyrics_tap_until;
-#define LYRICS_TAP_WAIT_MS 2000
-static int lyrics_pane_x;		// where the page rests
-static lv_obj_t *lyrics_view;
-static lv_obj_t *lyrics_note; // "no lyrics", in the middle of the column
-static lyrics_t lyrics_cur;
-static bool lyrics_loaded;		   // lyrics_cur belongs to lyrics_path, found or not
-static char lyrics_path[1024];	   // the file the view is for
-static unsigned lyrics_generation; // stale answers from the loader are dropped
-static int lyrics_lit = -1;		   // the line drawn as being sung
-static uint32_t lyrics_user_until; // no following until then: a finger is reading
-static bool lyrics_centred;		   // the lit line is where it belongs
-static lv_image_dsc_t lyrics_mask;
-static uint8_t *lyrics_mask_pixels;
-static int lyrics_view_h;
-
-// Timed lines have room above the first and below the last, so either can be
-// brought to the middle; untimed ones read from the top.
-static void lyrics_pad(void) {
-	int around = lyrics_cur.synced ? lyrics_view_h / 2 - 20 : LYRICS_FADE_PX / 2;
-	lv_obj_set_style_pad_top(lyrics_view, around, 0);
-	lv_obj_set_style_pad_bottom(lyrics_view, lyrics_cur.synced ? around : LYRICS_FADE_PX, 0);
-}
-
-// An A8 mask the size of the column, opaque but for a ramp at the top and at
-// the bottom. Built again only when the size changes.
-static void lyrics_mask_build(int w, int h) {
-	if (lyrics_mask_pixels && (int)lyrics_mask.header.w == w && (int)lyrics_mask.header.h == h) {
-		return;
-	}
-	if (lyrics_view) {
-		lv_obj_set_style_bitmap_mask_src(lyrics_view, NULL, 0);
-	}
-	free(lyrics_mask_pixels);
-	lyrics_mask_pixels = NULL;
-	if (w <= 0 || h <= 2 * LYRICS_FADE_PX) {
-		return;
-	}
-	lyrics_mask_pixels = malloc((size_t)w * (size_t)h);
-	if (!lyrics_mask_pixels) {
-		return;
-	}
-	for (int y = 0; y < h; y++) {
-		int edge = y < h - 1 - y ? y : h - 1 - y;
-		uint8_t a = edge >= LYRICS_FADE_PX ? 255 : (uint8_t)(edge * 255 / LYRICS_FADE_PX);
-		memset(lyrics_mask_pixels + (size_t)y * (size_t)w, a, (size_t)w);
-	}
-	memset(&lyrics_mask, 0, sizeof(lyrics_mask));
-	lyrics_mask.header.magic = LV_IMAGE_HEADER_MAGIC;
-	lyrics_mask.header.cf = LV_COLOR_FORMAT_A8;
-	lyrics_mask.header.w = (uint32_t)w;
-	lyrics_mask.header.h = (uint32_t)h;
-	lyrics_mask.header.stride = (uint32_t)w;
-	lyrics_mask.data = lyrics_mask_pixels;
-	lyrics_mask.data_size = (uint32_t)((size_t)w * (size_t)h);
-	lv_obj_set_style_bitmap_mask_src(lyrics_view, &lyrics_mask, 0);
-}
-
-static void lyrics_note_show(const char *tag) {
-	if (!lyrics_note) {
-		return;
-	}
-	if (tag) {
-		lv_label_set_text(lyrics_note, tr(tag));
-		lv_obj_set_hidden(lyrics_note, false);
-	} else {
-		lv_obj_set_hidden(lyrics_note, true);
-	}
-}
-
-// The column's scroll position, for its step animation.
-static void lyrics_scroll_exec(void *obj, int32_t y) { lv_obj_scroll_to_y(obj, y, LV_ANIM_OFF); }
-
-// The column's lines, one label each, from lyrics_cur.
-static void lyrics_fill(void) {
-	if (!lyrics_view) {
-		return;
-	}
-	lv_obj_clean(lyrics_view);
-	lyrics_pad();
-	lyrics_lit = -1;
-	lyrics_user_until = 0;
-	lyrics_centred = false;
-	lv_anim_delete(lyrics_view, lyrics_scroll_exec);
-	lv_obj_scroll_to_y(lyrics_view, 0, LV_ANIM_OFF);
-
-	if (!lyrics_loaded) {
-		lyrics_note_show(NULL); // still being read
-		return;
-	}
-	if (lyrics_cur.count == 0) {
-		lyrics_note_show("lyrics_none");
-		return;
-	}
-	lyrics_note_show(NULL);
-
-	for (int i = 0; i < lyrics_cur.count; i++) {
-		lv_obj_t *line = lv_label_create(lyrics_view);
-		lv_label_set_text(line, lyrics_cur.lines[i].text[0] ? lyrics_cur.lines[i].text : " ");
-		lv_label_set_long_mode(line, LV_LABEL_LONG_WRAP);
-		lv_obj_set_width(line, lv_pct(100));
-		lv_obj_set_style_text_align(line, LV_TEXT_ALIGN_CENTER, 0);
-		lv_obj_set_style_text_font(line, &font_ui_26, 0);
-		lv_obj_set_style_text_opa(line, lyrics_cur.synced ? LYRICS_DIM_OPA : LV_OPA_COVER, 0);
-		lv_obj_set_event_bubble(line, true);
-		lv_obj_set_clickable(line, false);
-	}
-}
 
 typedef struct {
 	unsigned generation;
@@ -1486,16 +2408,245 @@ typedef struct {
 	bool found;
 } lyrics_job_t;
 
-static void lyrics_settle(void);
+static const lv_font_t *lyrics_font_for(bool active_line, bool fullscreen) {
+	switch (lyrics_text_size) {
+	case PLAYER_LYRICS_TEXT_SMALL:
+		if (fullscreen) return active_line ? &font_ui_24_bold : &font_ui_20;
+		return active_line ? &font_ui_22_bold : &font_ui_18;
+	case PLAYER_LYRICS_TEXT_LARGE:
+		if (fullscreen) return active_line ? &font_ui_32_bold : &font_ui_24;
+		return active_line ? &font_ui_28_bold : &font_ui_22;
+	case PLAYER_LYRICS_TEXT_MEDIUM:
+	default:
+		if (fullscreen) return active_line ? &font_ui_28_bold : &font_ui_22;
+		return active_line ? &font_ui_24_bold : &font_ui_20;
+	}
+}
+
+static void lyrics_screen_hold_update(void) {
+	power_hold_screen_for_view(sheet_open && lyrics_state != LYRICS_VIEW_NONE);
+}
+
+static void lyrics_scroll_exec(void *obj, int32_t y) {
+	lv_obj_scroll_to_y((lv_obj_t *)obj, y, LV_ANIM_OFF);
+}
+
+static void lyrics_sync_resume_btn(void) {
+	if (!resume_sync_btn) {
+		return;
+	}
+	bool show = (lyrics_state != LYRICS_VIEW_NONE) && lyrics_cur.synced && lyrics_cur.count > 0 && lyrics_manual_hold;
+	lv_obj_set_hidden(resume_sync_btn, !show);
+	if (show) {
+		lv_obj_move_foreground(resume_sync_btn);
+	}
+}
+
+static void lyrics_paint_single_line(int index) {
+	if (!lyrics_view || index < 0 || index >= (int)lv_obj_get_child_count(lyrics_view) || index >= lyrics_cur.count) {
+		return;
+	}
+	lv_obj_t *label = lv_obj_get_child(lyrics_view, index);
+	bool fs = (lyrics_state == LYRICS_VIEW_FULLSCREEN);
+
+	if (!lyrics_cur.synced) {
+		lv_obj_set_style_text_font(label, lyrics_font_for(false, fs), 0);
+		lv_obj_set_style_text_color(label, pal_cur.text_primary, 0);
+		lv_obj_set_style_text_opa(label, LV_OPA_90, 0);
+		return;
+	}
+
+	bool active = (index == lyrics_lit);
+	lv_obj_set_style_text_font(label, lyrics_font_for(active, fs), 0);
+	if (active) {
+		lv_obj_set_style_text_color(label, pal_cur.accent, 0);
+		lv_obj_set_style_text_opa(label, LV_OPA_COVER, 0);
+	} else {
+		int dist = (lyrics_lit >= 0) ? LV_ABS(index - lyrics_lit) : (index + 1);
+		lv_opa_t opa = (dist == 1) ? 185 : (dist == 2) ? 132 : 92;
+		lv_obj_set_style_text_color(label, pal_cur.text_primary, 0);
+		lv_obj_set_style_text_opa(label, opa, 0);
+	}
+}
+
+static void lyrics_apply_line_styles(void) {
+	if (!lyrics_view) {
+		return;
+	}
+	uint32_t n = lv_obj_get_child_count(lyrics_view);
+	for (uint32_t i = 0; i < n; i++) {
+		lyrics_paint_single_line((int)i);
+	}
+}
+
+static void lyrics_update_padding(void) {
+	if (!lyrics_view) {
+		return;
+	}
+	bool fs = (lyrics_state == LYRICS_VIEW_FULLSCREEN);
+	int vh = lv_obj_get_height(lyrics_view);
+	if (vh <= 0) {
+		vh = fs ? (screen_h - 230) : stage_h;
+	}
+	int pad = lyrics_cur.synced ? (vh / 2 - 28) : 18;
+	if (pad < 16) pad = 16;
+	lv_obj_set_style_pad_top(lyrics_view, pad, 0);
+	lv_obj_set_style_pad_bottom(lyrics_view, lyrics_cur.synced ? pad : 28, 0);
+	lv_obj_set_style_pad_row(lyrics_view, fs ? LYRICS_LINE_GAP_FS : LYRICS_LINE_GAP_INT, 0);
+}
+
+static void lyrics_sync_empty_state(void) {
+	if (!lyrics_empty_box || !lyrics_view) {
+		return;
+	}
+	if (!lyrics_loaded) {
+		set_label_text_if_changed(lyrics_empty_label, tr("lyrics_loading"));
+		if (lyrics_empty_search_btn) lv_obj_set_hidden(lyrics_empty_search_btn, true);
+		lv_obj_set_hidden(lyrics_empty_box, false);
+		lv_obj_set_hidden(lyrics_view, true);
+		return;
+	}
+	if (lyrics_cur.count == 0) {
+		set_label_text_if_changed(lyrics_empty_label, tr("lyrics_none"));
+		device_state_t st;
+		device_state_get(&st);
+		if (lyrics_empty_search_btn) {
+			lv_obj_set_hidden(lyrics_empty_search_btn, !playing_local_file(&st));
+		}
+		lv_obj_set_hidden(lyrics_empty_box, false);
+		lv_obj_set_hidden(lyrics_view, true);
+		return;
+	}
+	lv_obj_set_hidden(lyrics_empty_box, true);
+	lv_obj_set_hidden(lyrics_view, false);
+}
+
+static void lyrics_fill(void) {
+	if (!lyrics_view) {
+		return;
+	}
+	lv_anim_delete(lyrics_view, lyrics_scroll_exec);
+	lv_obj_clean(lyrics_view);
+	lyrics_lit = -1;
+	lyrics_manual_hold = false;
+	lyrics_user_until = 0;
+	lyrics_centred = false;
+	lv_obj_scroll_to_y(lyrics_view, 0, LV_ANIM_OFF);
+	lyrics_sync_resume_btn();
+	lyrics_sync_empty_state();
+
+	if (!lyrics_loaded || lyrics_cur.count == 0) {
+		return;
+	}
+
+	lyrics_update_padding();
+	bool fs = (lyrics_state == LYRICS_VIEW_FULLSCREEN);
+	for (int i = 0; i < lyrics_cur.count; i++) {
+		lv_obj_t *line = lv_label_create(lyrics_view);
+		const char *txt = lyrics_cur.lines[i].text;
+		// Instrumental timestamped break: subtle minimalist rest dots, never invented words.
+		const char *shown = (txt && txt[0]) ? txt : (lyrics_cur.synced ? "· · ·" : " ");
+		lv_label_set_text(line, shown);
+		lv_label_set_long_mode(line, LV_LABEL_LONG_WRAP);
+		lv_obj_set_width(line, lv_pct(100));
+		lv_obj_set_style_text_align(line, fs ? LV_TEXT_ALIGN_LEFT : LV_TEXT_ALIGN_CENTER, 0);
+		lv_obj_set_event_bubble(line, true);
+		lv_obj_set_clickable(line, false);
+	}
+	lyrics_apply_line_styles();
+}
+
+static void lyrics_centre_line(int index, bool animate) {
+	if (!lyrics_view || index < 0 || index >= (int)lv_obj_get_child_count(lyrics_view)) {
+		return;
+	}
+	lv_obj_t *label = lv_obj_get_child(lyrics_view, index);
+	lv_obj_update_layout(lyrics_view);
+	lv_area_t line_area, view_area;
+	lv_obj_get_coords(label, &line_area);
+	lv_obj_get_coords(lyrics_view, &view_area);
+
+	int32_t from = lv_obj_get_scroll_y(lyrics_view);
+	int32_t to = from + (line_area.y1 + line_area.y2) / 2 - (view_area.y1 + view_area.y2) / 2;
+	if (to < 0) to = 0;
+
+	lv_anim_delete(lyrics_view, lyrics_scroll_exec);
+	if (to == from || !animate || !motion_enabled()) {
+		lv_obj_scroll_to_y(lyrics_view, to, LV_ANIM_OFF);
+		return;
+	}
+
+	lv_anim_t a;
+	lv_anim_init(&a);
+	lv_anim_set_var(&a, lyrics_view);
+	lv_anim_set_exec_cb(&a, lyrics_scroll_exec);
+	lv_anim_set_values(&a, from, to);
+	lv_anim_set_duration(&a, LYRICS_SCROLL_MS);
+	lv_anim_set_path_cb(&a, lv_anim_path_ease_out);
+	lv_anim_start(&a);
+}
+
+static void lyrics_follow(double seconds) {
+	if (lyrics_state == LYRICS_VIEW_NONE || !lyrics_view || !lyrics_cur.synced || lyrics_cur.count == 0) {
+		return;
+	}
+
+	int32_t raw_ms = (int32_t)(seconds * 1000.0);
+	if (lyrics_tap_ms >= 0) {
+		if ((int32_t)(lv_tick_get() - lyrics_tap_until) < 0 && LV_ABS(raw_ms - lyrics_tap_ms) > 1500) {
+			return;
+		}
+		lyrics_tap_ms = -1;
+	}
+
+	int32_t eff_ms = raw_ms + lyrics_offset_ms;
+	if (eff_ms < 0) eff_ms = 0;
+	int line = lyrics_line_at(&lyrics_cur, eff_ms);
+
+	if (line != lyrics_lit) {
+		int prev = lyrics_lit;
+		lyrics_lit = line;
+		// Repaint only lines whose progressive distance band changed
+		int lo1 = (prev >= 0 ? prev : 0) - 3;
+		int hi1 = (prev >= 0 ? prev : 0) + 3;
+		int lo2 = (line >= 0 ? line : 0) - 3;
+		int hi2 = (line >= 0 ? line : 0) + 3;
+		for (int i = lo1; i <= hi1; i++) lyrics_paint_single_line(i);
+		for (int i = lo2; i <= hi2; i++) {
+			if (i < lo1 || i > hi1) lyrics_paint_single_line(i);
+		}
+		lyrics_centred = false;
+	}
+
+	if (lyrics_manual_hold) {
+		if ((int32_t)(lv_tick_get() - lyrics_user_until) >= 0 && audio_get_status() == AUDIO_STATUS_PLAYING) {
+			lyrics_manual_hold = false;
+			lyrics_user_until = 0;
+			lyrics_sync_resume_btn();
+			lyrics_centred = false;
+		} else {
+			return;
+		}
+	}
+
+	if (!lyrics_centred) {
+		lyrics_centred = true;
+		lyrics_centre_line(line >= 0 ? line : 0, true);
+	}
+}
 
 static void lyrics_arrived(void *user) {
 	lyrics_job_t *job = user;
 	if (job->generation == lyrics_generation && strcmp(job->path, lyrics_path) == 0) {
 		lyrics_free(&lyrics_cur);
-		lyrics_cur = job->lyrics; // handed over, found or empty
+		lyrics_cur = job->lyrics;
 		lyrics_loaded = true;
 		lyrics_fill();
-		lyrics_settle();
+		if (lyrics_state != LYRICS_VIEW_NONE && lyrics_cur.synced && lyrics_cur.count > 0) {
+			device_state_t st;
+			device_state_get(&st);
+			lyrics_follow(st.progress_current_secs);
+		}
 	} else {
 		lyrics_free(&job->lyrics);
 	}
@@ -1504,6 +2655,7 @@ static void lyrics_arrived(void *user) {
 
 static void *lyrics_worker(void *arg) {
 	lyrics_job_t *job = arg;
+	thread_be_low_priority("lyricsload");
 	job->found = lyrics_load(job->path, job->title, &job->lyrics);
 	if (!gui_post(lyrics_arrived, job)) {
 		lyrics_free(&job->lyrics);
@@ -1512,32 +2664,15 @@ static void *lyrics_worker(void *arg) {
 	return NULL;
 }
 
-// Only a file on the card has words to show.
-static bool lyrics_available(void) {
-	device_state_t state;
-	device_state_get(&state);
-	return playing_local_file(&state);
-}
-
-// The page is up, or on its way in or out under a finger.
-static bool lyrics_on_screen(void) { return lyrics_pane && !lv_obj_is_hidden(lyrics_pane); }
-
-// Words being read are not an idle screen: while the lyrics are up on an open
-// player, the idle timer does not blank the panel under them. Asked again
-// wherever either half changes; the hold itself ignores a call that changes
-// nothing.
-static void lyrics_screen_hold_update(void) { power_hold_screen_for_view(sheet_open && lyrics_on_screen()); }
-
-// The words of the file playing are known before any swipe: on a track with
-// none the swipe asks to download them, and the page goes away by itself on
-// one.
-static bool lyrics_has_words(void) { return lyrics_loaded && lyrics_cur.count > 0; }
-
-// The lyrics of the file playing, read on a thread of their own as soon as it
-// starts: the tags of a FLAC are read whole, pictures included, and that is
-// not the interface's to wait for. Asked again only when the file changes.
 static void lyrics_request(const device_state_t *state) {
 	if (!state->current_file[0] || !playing_local_file(state)) {
+		if (lyrics_path[0]) {
+			lyrics_path[0] = '\0';
+			lyrics_free(&lyrics_cur);
+			lyrics_loaded = true;
+			lyrics_generation++;
+			lyrics_fill();
+		}
 		return;
 	}
 	if (strcmp(state->current_file, lyrics_path) == 0) {
@@ -1564,439 +2699,318 @@ static void lyrics_request(const device_state_t *state) {
 	}
 }
 
-// Brings `label` to the middle of the column, always in the same short time
-// whatever the distance, so the words step up like a typewriter's paper.
-static void lyrics_centre(lv_obj_t *label) {
-	lv_obj_update_layout(lyrics_view);
-	lv_area_t line_area;
-	lv_area_t view_area;
-	lv_obj_get_coords(label, &line_area);
-	lv_obj_get_coords(lyrics_view, &view_area);
-	int32_t from = lv_obj_get_scroll_y(lyrics_view);
-	int32_t to = from + (line_area.y1 + line_area.y2) / 2 - (view_area.y1 + view_area.y2) / 2;
-	if (to < 0) {
-		to = 0;
-	}
-
-	lv_anim_delete(lyrics_view, lyrics_scroll_exec);
-	if (to == from) {
-		return;
-	}
-	lv_anim_t a;
-	lv_anim_init(&a);
-	lv_anim_set_var(&a, lyrics_view);
-	lv_anim_set_exec_cb(&a, lyrics_scroll_exec);
-	lv_anim_set_values(&a, from, to);
-	lv_anim_set_duration(&a, LYRICS_STEP_MS);
-	lv_anim_set_path_cb(&a, lv_anim_path_ease_out);
-	lv_anim_start(&a);
-}
-
-static void lyrics_paint_line(int index, bool lit) {
-	if (!lyrics_view || index < 0 || index >= (int)lv_obj_get_child_count(lyrics_view)) {
-		return;
-	}
-	lv_obj_t *label = lv_obj_get_child(lyrics_view, index);
-	// Unlit, the line wears the column's colour (see lyrics_look()).
-	if (lit) {
-		lv_obj_set_style_text_color(label, chrome_accent(), 0);
-	} else {
-		lv_obj_remove_local_style_prop(label, LV_STYLE_TEXT_COLOR, 0);
-	}
-	lv_obj_set_style_text_opa(label, lit ? LV_OPA_COVER : LYRICS_DIM_OPA, 0);
-}
-
-static void lyrics_repaint_lit(void) { lyrics_paint_line(lyrics_lit, true); }
-
-// The line being sung, lit and held in the middle of the column. Once a
-// finger has scrolled the words, the column comes back to it a few seconds
-// after the finger stops -- or, with the music paused, once it plays again:
-// until then the words stay where the finger left them.
-static void lyrics_follow(double seconds) {
-	if (!lyrics_on_screen() || !lyrics_view || !lyrics_cur.synced || lyrics_cur.count == 0) {
-		return;
-	}
-	int32_t ms = (int32_t)(seconds * 1000.0);
-	if (lyrics_tap_ms >= 0) {
-		// Until the player reports a position near the tapped line, the one
-		// it reports is from before the jump: following it would send the
-		// column back there and then forward again.
-		if ((int32_t)(lv_tick_get() - lyrics_tap_until) < 0 && LV_ABS(ms - lyrics_tap_ms) > 1500) {
-			return;
-		}
-		lyrics_tap_ms = -1;
-	}
-	int line = lyrics_line_at(&lyrics_cur, ms);
-	if (line != lyrics_lit) {
-		lyrics_paint_line(lyrics_lit, false);
-		lyrics_lit = line;
-		lyrics_paint_line(line, true);
-		lyrics_centred = false;
-	}
-
-	if (lyrics_centred) {
-		return;
-	}
-	if (lyrics_user_until &&
-		((int32_t)(lv_tick_get() - lyrics_user_until) < 0 || audio_get_status() != AUDIO_STATUS_PLAYING)) {
-		return;
-	}
-	lyrics_user_until = 0;
-	lyrics_centred = true;
-	if (line >= 0 && line < (int)lv_obj_get_child_count(lyrics_view)) {
-		lyrics_centre(lv_obj_get_child(lyrics_view, line));
-	} else {
-		lyrics_centre(lv_obj_get_child(lyrics_view, 0));
-	}
-}
-
 static void lyrics_scroll_cb(lv_event_t *e) {
 	(void)e;
-	// A finger, not the column following the music: that scrolls from a timer.
-	if (lv_indev_active()) {
+	if (lv_indev_active() && lyrics_cur.synced && lyrics_cur.count > 0) {
 		lv_anim_delete(lyrics_view, lyrics_scroll_exec);
+		lyrics_manual_hold = true;
 		lyrics_user_until = lv_tick_get() + LYRICS_USER_HOLD_MS;
 		lyrics_centred = false;
+		lyrics_sync_resume_btn();
 	}
 }
 
-// The blurred sleeve the words sit on: Studio's own, or the one made for the
-// other two arrangements. NULL while there is none.
-static const lv_image_dsc_t *lyrics_backdrop(void) {
-	if (layout_studio_now) {
-		return current_backdrop.pixels ? &current_backdrop.dsc : NULL;
-	}
-	return lyrics_screen_pic.pixels ? &lyrics_screen_pic.dsc : NULL;
+static void resume_sync_btn_cb(lv_event_t *e) {
+	(void)e;
+	lyrics_manual_hold = false;
+	lyrics_user_until = 0;
+	lyrics_centred = false;
+	lyrics_sync_resume_btn();
+	device_state_t st;
+	device_state_get(&st);
+	lyrics_follow(st.progress_current_secs);
 }
 
-// Keeps the title and artist at the top saying what the row below says.
-static void lyrics_head_sync(void) {
-	if (!lyrics_head || !song_title_label || !song_artist_label) {
+static void lyrics_tap_cb(lv_event_t *e) {
+	(void)e;
+	if (player_sheet_drag_active() || switcher_back_drag_active() || !lyrics_cur.synced || !lyrics_view) {
 		return;
 	}
-	scrolltext_set(lyrics_head_title, lv_label_get_text(song_title_label));
-	scrolltext_set(lyrics_head_artist, lv_label_get_text(song_artist_label));
-}
-
-// Studio's look for the arrangements that are not Studio: its blurred
-// sleeve behind the whole screen, and the surfaces that would cover it --
-// the sleeve's panel and the controls' own blurred block -- made clear. Put on
-// in one step when the words start to come in, not faded with the finger: a
-// screen-sized blend redrawn on every frame of the swipe is what this
-// processor cannot keep up with. Only with a picture to show; without one the
-// page keeps its own background, whole, and the words take the theme's
-// colours.
-static bool lyrics_look_on;
-
-static void lyrics_look(bool on) {
-	if (layout_studio_now) {
-		on = false; // Studio is the look already
-	}
-	const lv_image_dsc_t *backdrop = lyrics_backdrop();
-	if (on && !backdrop) {
-		on = false;
-	}
-	if (on) {
-		lv_image_set_src(studio_bg, backdrop);
-		lv_obj_set_hidden(studio_bg, false);
-		lv_obj_move_background(studio_bg);
-		lv_obj_set_style_bg_opa(cover_panel, LV_OPA_TRANSP, 0);
-		lv_obj_set_style_bg_opa(player_menu, LV_OPA_TRANSP, 0);
-		lv_obj_set_style_bg_image_opa(player_menu, LV_OPA_TRANSP, 0);
-	} else if (lyrics_look_on && !layout_studio_now) {
-		lv_obj_set_hidden(studio_bg, true);
-		lv_obj_remove_local_style_prop(cover_panel, LV_STYLE_BG_OPA, 0);
-		lv_obj_remove_local_style_prop(player_menu, LV_STYLE_BG_OPA, 0);
-		lv_obj_remove_local_style_prop(player_menu, LV_STYLE_BG_IMAGE_OPA, 0);
-	}
-	lyrics_look_on = on;
-	// The words are white over a blurred sleeve, and in the theme's own
-	// colour over the page's own background where there is no picture.
-	lv_color_t ink = lyrics_backdrop() ? lv_color_white() : theme()->text_primary;
-	lv_obj_set_style_text_color(lyrics_view, ink, 0);
-	lv_obj_set_style_text_color(lyrics_note, ink, 0);
-	lv_obj_set_style_text_color(lyrics_head_title, ink, 0);
-	lv_obj_set_style_text_color(lyrics_head_artist, lyrics_backdrop() ? lv_color_make(200, 200, 200) : theme()->text_secondary, 0);
-}
-
-// What travels with the sleeve: it goes out to the left as the words come in.
-static void lyrics_shift(lv_obj_t *obj, int32_t x) {
-	if (!obj) {
+	lv_indev_t *indev = lv_indev_active();
+	if (!indev) {
 		return;
 	}
-	if (x == 0) {
-		lv_obj_remove_local_style_prop(obj, LV_STYLE_TRANSLATE_X, 0);
+	lv_point_t p;
+	lv_indev_get_point(indev, &p);
+	uint32_t count = lv_obj_get_child_count(lyrics_view);
+	int gap = (lyrics_state == LYRICS_VIEW_FULLSCREEN) ? LYRICS_LINE_GAP_FS : LYRICS_LINE_GAP_INT;
+
+	for (uint32_t i = 0; i < count && i < (uint32_t)lyrics_cur.count; i++) {
+		lv_area_t area;
+		lv_obj_get_coords(lv_obj_get_child(lyrics_view, i), &area);
+		if (p.y >= area.y1 && p.y <= area.y2 + gap) {
+			int32_t ms = lyrics_cur.lines[i].ms;
+			if (ms < 0) return;
+			int32_t target_ms = ms - lyrics_offset_ms;
+			if (target_ms < 0) target_ms = 0;
+			double secs = (double)target_ms / 1000.0;
+			device_state_seek(secs);
+			lyrics_manual_hold = false;
+			lyrics_user_until = 0;
+			lyrics_centred = false;
+			lyrics_sync_resume_btn();
+			lyrics_tap_ms = target_ms;
+			lyrics_tap_until = lv_tick_get() + LYRICS_TAP_WAIT_MS;
+			lyrics_follow(secs);
+			return;
+		}
+	}
+}
+
+static void update_fs_offset_labels(void) {
+	if (!fs_offset_value_label || !fs_offset_toggle_label) {
+		return;
+	}
+	char buf[40];
+	if (lyrics_offset_ms == 0) {
+		snprintf(buf, sizeof(buf), "%s · 0.0s", tr("lyrics_offset"));
 	} else {
-		lv_obj_set_style_translate_x(obj, x, 0);
+		snprintf(buf, sizeof(buf), "%s · %+0.1fs", tr("lyrics_offset"), (double)lyrics_offset_ms / 1000.0);
+	}
+	set_label_text_if_changed(fs_offset_value_label, buf);
+	lv_obj_set_style_text_color(fs_offset_value_label,
+								lyrics_offset_ms != 0 ? pal_cur.accent : pal_cur.text_primary, 0);
+	lv_obj_set_style_text_color(fs_offset_toggle_label,
+								(fs_offset_bar_open || lyrics_offset_ms != 0) ? pal_cur.accent : pal_cur.text_primary,
+								0);
+}
+
+static void layout_fs_stage(void) {
+	if (!fullscreen_lyrics_box || !fs_stage_area) {
+		return;
+	}
+	int top_y = bar_always ? (bar_height + 2) : 12;
+	lv_obj_set_pos(fs_header_row, side_margin, top_y);
+	lv_obj_set_size(fs_header_row, content_w, 54);
+
+	int stage_top = top_y + 58;
+	if (fs_offset_bar) {
+		lv_obj_set_hidden(fs_offset_bar, !fs_offset_bar_open);
+		if (fs_offset_bar_open) {
+			lv_obj_set_pos(fs_offset_bar, side_margin, stage_top);
+			lv_obj_set_size(fs_offset_bar, content_w, 42);
+			stage_top += 48;
+		}
+	}
+
+	int deck_h = is_tall_panel ? 136 : 126;
+	lv_obj_set_pos(fs_bottom_deck, side_margin, screen_h - deck_h);
+	lv_obj_set_size(fs_bottom_deck, content_w, deck_h);
+
+	int sh = (screen_h - deck_h - 6) - stage_top;
+	if (sh < 140) sh = 140;
+	lv_obj_set_pos(fs_stage_area, side_margin, stage_top);
+	lv_obj_set_size(fs_stage_area, content_w, sh);
+
+	if (lyrics_state == LYRICS_VIEW_FULLSCREEN && lyrics_view) {
+		lv_obj_set_size(lyrics_view, content_w, sh);
+		lv_obj_set_pos(lyrics_view, 0, 0);
+		lyrics_update_padding();
 	}
 }
 
-// The star of the arrangement with the shape of the track, which lives in a
-// disc on the sleeve: while the words are up it moves to the head, at the
-// right of the names, and back into its disc when they go.
-static bool lyrics_star_up;
-
-static void lyrics_star_to_head(bool up) {
-	if (up == lyrics_star_up || !fav_btn_obj || !alt_fav_circle) {
-		return;
-	}
-	lyrics_star_up = up;
-	if (up) {
-		lv_obj_set_parent(fav_btn_obj, lyrics_head);
-		lv_obj_align(fav_btn_obj, LV_ALIGN_RIGHT_MID, 0, 0);
-	} else {
-		lv_obj_set_parent(fav_btn_obj, alt_fav_circle);
-		lv_obj_center(fav_btn_obj);
-	}
+static void stage_opa_exec_cb(void *var, int32_t v) {
+	lv_obj_set_style_opa((lv_obj_t *)var, (lv_opa_t)v, 0);
 }
 
-// The button at the top right while the words are all the way in: it looks them
-// up on LRCLIB again, to pick others in their place. Beside the star or the
-// ellipsis where an arrangement keeps one up there, in the corner otherwise.
-#define LYRICS_FIND_BTN 56
-static lv_obj_t *lyrics_find_btn;
-static lv_obj_t *lyrics_find_icon;
-static lv_obj_t *lyrics_find_narrowed; // the names' column, made room in
-
-// The names at the top give up the button's width on both sides, so a long
-// title stays centred and stops short of it.
-static void lyrics_find_make_room(lv_obj_t *col) {
-	if (col == lyrics_find_narrowed) {
+static void lyrics_reparent_shared_stage(lv_obj_t *host, int w, int h, bool fullscreen) {
+	if (!host || !lyrics_view || !lyrics_empty_box || !resume_sync_btn) {
 		return;
 	}
-	if (lyrics_find_narrowed) {
-		int32_t w = lv_obj_get_style_width(lyrics_find_narrowed, 0);
-		lv_obj_set_width(lyrics_find_narrowed, w + 2 * LYRICS_FIND_BTN);
+	lv_obj_set_parent(lyrics_view, host);
+	lv_obj_set_pos(lyrics_view, 0, fullscreen ? 0 : 40);
+	lv_obj_set_size(lyrics_view, w, fullscreen ? h : (h - 42));
+
+	lv_obj_set_parent(lyrics_empty_box, host);
+	lv_obj_center(lyrics_empty_box);
+
+	lv_obj_set_parent(resume_sync_btn, host);
+	lv_obj_align(resume_sync_btn, LV_ALIGN_BOTTOM_MID, 0, -12);
+
+	uint32_t count = lv_obj_get_child_count(lyrics_view);
+	for (uint32_t i = 0; i < count; i++) {
+		lv_obj_set_style_text_align(lv_obj_get_child(lyrics_view, i),
+									fullscreen ? LV_TEXT_ALIGN_LEFT : LV_TEXT_ALIGN_CENTER, 0);
 	}
-	if (col) {
-		int32_t w = lv_obj_get_style_width(col, 0);
-		lv_obj_set_width(col, w - 2 * LYRICS_FIND_BTN);
-	}
-	lyrics_find_narrowed = col;
+	lyrics_update_padding();
+	lyrics_apply_line_styles();
+	lyrics_sync_empty_state();
+	lyrics_sync_resume_btn();
 }
 
-static void lyrics_find_sync(bool full) {
-	if (!lyrics_find_btn) {
+static void lyrics_set_mode(lyrics_view_state_t mode, bool animate) {
+	if (mode == lyrics_state) {
 		return;
 	}
-	bool show = full && lyrics_now;
-	if (!show) {
-		lv_obj_set_hidden(lyrics_find_btn, true);
-		lyrics_find_make_room(NULL);
-		return;
-	}
-	int width = layout_studio_now ? studio_box_w : cover_box_w;
-	int beside = 0;
-	if (layout_studio_now && more_btn_obj) {
-		beside = lv_obj_get_width(more_btn_obj);
-	} else if (layout_alt_now && fav_btn_obj) {
-		beside = lv_obj_get_width(fav_btn_obj);
-	}
-	lv_obj_set_pos(lyrics_find_btn, width - STUDIO_MARGIN - beside - LYRICS_FIND_BTN, back_btn_centre_y() - LYRICS_FIND_BTN / 2);
-	lyrics_find_make_room(layout_studio_now ? studio_text_col : layout_alt_now ? lyrics_head_col : NULL);
-	// The ink of the names beside it: white over the blurred sleeve, the
-	// theme's own over the page's background.
-	lv_obj_set_style_image_recolor(lyrics_find_icon, lyrics_backdrop() ? lv_color_white() : theme()->text_primary, 0);
-	lv_obj_set_hidden(lyrics_find_btn, false);
-	lv_obj_move_foreground(lyrics_find_btn);
-}
 
-// Everything the swipe moves, at `progress` of the way from the sleeve (0)
-// to the words (LYRICS_FULL). Only positions change from one frame to the
-// next; at 0 every style touched is handed back, so the arrangement is
-// exactly what it was before the first swipe.
-static void lyrics_progress_apply(int32_t progress) {
-	if (!lyrics_pane) {
-		return;
-	}
-	if (progress < 0) {
-		progress = 0;
-	}
-	if (progress > LYRICS_FULL) {
-		progress = LYRICS_FULL;
-	}
-	lyrics_progress = progress;
-	lyrics_find_sync(progress == LYRICS_FULL);
-	bool rest = progress == 0;
-	int32_t travel = cover_box_w - lyrics_pane_x;
+	lv_anim_delete(carousel_stage, stage_opa_exec_cb);
+	lv_anim_delete(integrated_lyrics_box, stage_opa_exec_cb);
+	lv_anim_delete(fullscreen_lyrics_box, stage_opa_exec_cb);
 
-	if (rest) {
-		lv_obj_set_hidden(lyrics_pane, true);
-	} else if (lv_obj_is_hidden(lyrics_pane)) {
-		lv_obj_set_hidden(lyrics_pane, false);
-		lv_obj_move_foreground(lyrics_pane);
+	lyrics_state = mode;
+	if (mode == LYRICS_VIEW_INTEGRATED) {
+		lyrics_last_mode = PLAYER_LYRICS_INTEGRATED;
+		if (lyrics_remember_mode) {
+			config_set_int("lyrics", "last_mode", (int)lyrics_last_mode);
+			config_save();
+		}
+	} else if (mode == LYRICS_VIEW_FULLSCREEN) {
+		lyrics_last_mode = PLAYER_LYRICS_FULLSCREEN;
+		if (lyrics_remember_mode) {
+			config_set_int("lyrics", "last_mode", (int)lyrics_last_mode);
+			config_save();
+		}
 	}
+
+	if (mode == LYRICS_VIEW_NONE) {
+		if (sheet_open) {
+			back_btn_force_hidden(false);
+			back_btn_sync_visibility();
+		}
+		if (fullscreen_lyrics_box) lv_obj_set_hidden(fullscreen_lyrics_box, true);
+		if (integrated_lyrics_box) lv_obj_set_hidden(integrated_lyrics_box, true);
+		if (carousel_stage) {
+			lv_obj_set_hidden(carousel_stage, false);
+			carousel_layout_slots();
+			if (animate && motion_enabled()) {
+				lv_obj_set_style_opa(carousel_stage, LV_OPA_TRANSP, 0);
+				lv_anim_t a;
+				lv_anim_init(&a);
+				lv_anim_set_var(&a, carousel_stage);
+				lv_anim_set_exec_cb(&a, stage_opa_exec_cb);
+				lv_anim_set_values(&a, LV_OPA_TRANSP, LV_OPA_COVER);
+				lv_anim_set_duration(&a, LYRICS_MODE_ANIM_MS);
+				lv_anim_set_path_cb(&a, lv_anim_path_ease_out);
+				lv_anim_start(&a);
+			} else {
+				lv_obj_set_style_opa(carousel_stage, LV_OPA_COVER, 0);
+			}
+		}
+	} else if (mode == LYRICS_VIEW_INTEGRATED) {
+		if (sheet_open) {
+			back_btn_force_hidden(false);
+			back_btn_sync_visibility();
+		}
+		if (fullscreen_lyrics_box) lv_obj_set_hidden(fullscreen_lyrics_box, true);
+		if (carousel_stage) lv_obj_set_hidden(carousel_stage, true);
+
+		lyrics_reparent_shared_stage(integrated_lyrics_box, content_w - 24, stage_h, false);
+		if (int_lyrics_search_btn) lv_obj_move_foreground(int_lyrics_search_btn);
+		if (int_lyrics_expand_btn) lv_obj_move_foreground(int_lyrics_expand_btn);
+		lv_obj_set_hidden(integrated_lyrics_box, false);
+
+		if (animate && motion_enabled()) {
+			lv_obj_set_style_opa(integrated_lyrics_box, LV_OPA_TRANSP, 0);
+			lv_anim_t a;
+			lv_anim_init(&a);
+			lv_anim_set_var(&a, integrated_lyrics_box);
+			lv_anim_set_exec_cb(&a, stage_opa_exec_cb);
+			lv_anim_set_values(&a, LV_OPA_TRANSP, LV_OPA_COVER);
+			lv_anim_set_duration(&a, LYRICS_MODE_ANIM_MS);
+			lv_anim_set_path_cb(&a, lv_anim_path_ease_out);
+			lv_anim_start(&a);
+		} else {
+			lv_obj_set_style_opa(integrated_lyrics_box, LV_OPA_COVER, 0);
+		}
+
+		device_state_t st;
+		device_state_get(&st);
+		lyrics_request(&st);
+		lyrics_centred = false;
+		lyrics_follow(st.progress_current_secs);
+	} else if (mode == LYRICS_VIEW_FULLSCREEN) {
+		if (sheet_open) {
+			back_btn_force_hidden(true);
+		}
+		layout_fs_stage();
+		lyrics_reparent_shared_stage(fs_stage_area, content_w, lv_obj_get_height(fs_stage_area), true);
+		lv_obj_set_hidden(fullscreen_lyrics_box, false);
+		lv_obj_move_foreground(fullscreen_lyrics_box);
+
+		if (animate && motion_enabled()) {
+			lv_obj_set_style_opa(fullscreen_lyrics_box, LV_OPA_TRANSP, 0);
+			lv_anim_t a;
+			lv_anim_init(&a);
+			lv_anim_set_var(&a, fullscreen_lyrics_box);
+			lv_anim_set_exec_cb(&a, stage_opa_exec_cb);
+			lv_anim_set_values(&a, LV_OPA_TRANSP, LV_OPA_COVER);
+			lv_anim_set_duration(&a, LYRICS_MODE_ANIM_MS);
+			lv_anim_set_path_cb(&a, lv_anim_path_ease_out);
+			lv_anim_start(&a);
+		} else {
+			lv_obj_set_style_opa(fullscreen_lyrics_box, LV_OPA_COVER, 0);
+		}
+
+		device_state_t st;
+		device_state_get(&st);
+		lyrics_request(&st);
+		lyrics_centred = false;
+		lyrics_follow(st.progress_current_secs);
+	}
+
 	lyrics_screen_hold_update();
-	lv_obj_set_x(lyrics_pane, lyrics_pane_x + travel * (LYRICS_FULL - progress) / LYRICS_FULL);
-	if (rest || !lyrics_look_on) {
-		lyrics_look(!rest);
-	}
+	update_queue_and_shortcuts();
+}
 
-	int32_t away = -(int32_t)cover_box_w * progress / LYRICS_FULL;
-	if (layout_studio_now) {
-		lyrics_shift(studio_cover, away);
-		lyrics_shift(studio_empty, away);
-		lyrics_shift(studio_quality, away);
+static void lyrics_shortcut_cb(lv_event_t *e) {
+	(void)e;
+	if (player_sheet_drag_active() || switcher_back_drag_active()) {
 		return;
 	}
-	lyrics_shift(cover_img, away);
-	lyrics_shift(cover_placeholder_icon, away);
-	if (!layout_alt_now) {
-		return; // the names stay in their row below the sleeve
+	if (lyrics_state != LYRICS_VIEW_NONE) {
+		lyrics_set_mode(LYRICS_VIEW_NONE, true);
+		return;
 	}
+	player_lyrics_mode_t preferred = lyrics_remember_mode ? lyrics_last_mode : lyrics_default_mode;
+	lyrics_set_mode(preferred == PLAYER_LYRICS_FULLSCREEN ? LYRICS_VIEW_FULLSCREEN : LYRICS_VIEW_INTEGRATED, true);
+}
 
-	// With the shape of the track the names are pills on the sleeve, so they
-	// go with it, and come up at the top once the words are in.
-	lyrics_shift(alt_text_col, away);
-	lyrics_shift(alt_fav_circle, away);
-	bool full = progress == LYRICS_FULL;
-	lyrics_star_to_head(full);
-	if (full) {
-		lyrics_head_sync();
-		lv_obj_set_hidden(lyrics_head, false);
-		lv_obj_move_foreground(lyrics_head);
-		if (lyrics_find_btn && !lv_obj_is_hidden(lyrics_find_btn)) {
-			lv_obj_move_foreground(lyrics_find_btn);
-		}
+static void lyrics_expand_cb(lv_event_t *e) {
+	(void)e;
+	if (player_sheet_drag_active() || switcher_back_drag_active()) {
+		return;
+	}
+	lyrics_set_mode(LYRICS_VIEW_FULLSCREEN, true);
+}
+
+static void fs_collapse_to_integrated_cb(lv_event_t *e) {
+	(void)e;
+	lyrics_set_mode(LYRICS_VIEW_INTEGRATED, true);
+}
+
+static void fs_return_to_artwork_cb(lv_event_t *e) {
+	(void)e;
+	lyrics_set_mode(LYRICS_VIEW_NONE, true);
+}
+
+static void fs_size_cycle_cb(lv_event_t *e) {
+	(void)e;
+	player_lyrics_text_size_t next = (player_lyrics_text_size_t)(((int)lyrics_text_size + 1) % 3);
+	player_lyrics_set_text_size(next);
+}
+
+static void fs_offset_toggle_cb(lv_event_t *e) {
+	(void)e;
+	fs_offset_bar_open = !fs_offset_bar_open;
+	update_fs_offset_labels();
+	layout_fs_stage();
+	lyrics_centred = false;
+	device_state_t st;
+	device_state_get(&st);
+	lyrics_follow(st.progress_current_secs);
+}
+
+static void fs_offset_step_cb(lv_event_t *e) {
+	int delta = (int)(intptr_t)lv_event_get_user_data(e);
+	if (delta == 0) {
+		player_lyrics_set_offset_ms(0);
 	} else {
-		lv_obj_set_hidden(lyrics_head, true);
-	}
-}
-
-// While the page moves, the fade at its edges is left off: it is drawn by
-// rendering the column into a layer of its own and masking it, which is fine
-// once a scroll step and far too much for every frame of a swipe.
-static void lyrics_fade(bool on) {
-	if (lyrics_view && lyrics_mask_pixels) {
-		lv_obj_set_style_bitmap_mask_src(lyrics_view, on ? &lyrics_mask : NULL, 0);
-	}
-}
-
-static void lyrics_progress_exec(void *obj, int32_t value) {
-	(void)obj;
-	lyrics_progress_apply(value);
-}
-
-static void lyrics_slid_cb(lv_anim_t *a) {
-	(void)a;
-	lyrics_fade(true);
-}
-
-static void lyrics_slide_to(int32_t progress) {
-	lv_anim_delete(lyrics_pane, lyrics_progress_exec);
-	if (lyrics_progress == progress) {
-		lyrics_progress_apply(progress);
-		lyrics_fade(true);
-		return;
-	}
-	lyrics_fade(false);
-	lv_anim_t a;
-	lv_anim_init(&a);
-	lv_anim_set_var(&a, lyrics_pane);
-	lv_anim_set_exec_cb(&a, lyrics_progress_exec);
-	lv_anim_set_values(&a, lyrics_progress, progress);
-	lv_anim_set_duration(&a, LYRICS_SLIDE_MS);
-	lv_anim_set_path_cb(&a, lv_anim_path_ease_out);
-	lv_anim_set_completed_cb(&a, lyrics_slid_cb);
-	lv_anim_start(&a);
-}
-
-// The head's place: Studio's, between the chevron and the right edge.
-static int lyrics_head_top(void) {
-	int head_top = back_btn_centre_y() - STUDIO_HEAD_H / 2;
-	return head_top < 2 ? 2 : head_top;
-}
-
-// Where the page goes in the arrangement on show: in Studio from under the
-// head to above the controls, over the sleeve; with the shape of the track
-// from under the head that takes the names; in the standard arrangement from
-// under the chevron. Outside Studio the page covers the whole square.
-static void lyrics_layout(void) {
-	if (!lyrics_pane) {
-		return;
-	}
-	int head_bottom = lyrics_head_top() + STUDIO_HEAD_H + STUDIO_BADGE_GAP;
-	int top = layout_alt_now || layout_studio_now ? head_bottom : back_btn_centre_y() + 28;
-	int pane_y = 0;
-	int x = 0, w = cover_box_w, h = cover_box_h - top;
-	if (layout_studio_now) {
-		pane_y = top;
-		int bottom = studio_box_h - STUDIO_BOTTOM;
-		if (layout_wave_now && wave_canvas) {
-			bottom -= WAVE_HEIGHT - PROGRESS_TRACK_HEIGHT;
-		}
-		x = STUDIO_MARGIN;
-		w = studio_box_w - 2 * STUDIO_MARGIN;
-		h = bottom - top;
-	}
-	lyrics_pane_x = x;
-	int view_x = layout_studio_now ? 0 : STUDIO_MARGIN;
-	int view_y = top - pane_y;
-	int view_w = w - 2 * view_x;
-
-	// Into the new arrangement with the styles of the old one handed back.
-	lv_anim_delete(lyrics_pane, lyrics_progress_exec);
-	lyrics_progress_apply(0);
-	// apply_layout() has just put the star where this arrangement keeps it,
-	// and the head belongs to the one before.
-	lyrics_star_up = false;
-	if (lyrics_head) {
-		lv_obj_set_hidden(lyrics_head, true);
-	}
-
-	lv_obj_set_y(lyrics_pane, pane_y);
-	lv_obj_set_size(lyrics_pane, w, h + view_y);
-	lv_obj_set_pos(lyrics_view, view_x, view_y);
-	lv_obj_set_size(lyrics_view, view_w, h);
-	lyrics_view_h = h;
-	lyrics_pad();
-	lyrics_mask_build(view_w, h);
-	lv_obj_set_size(lyrics_note, view_w, LV_SIZE_CONTENT);
-	lv_obj_set_pos(lyrics_note, view_x, view_y + h / 2 - 20);
-
-	if (lyrics_head) {
-		lv_obj_set_pos(lyrics_head, STUDIO_MARGIN, lyrics_head_top());
-		lv_obj_set_size(lyrics_head, cover_box_w - 2 * STUDIO_MARGIN, STUDIO_HEAD_H);
-	}
-	lyrics_progress_apply(lyrics_now ? LYRICS_FULL : 0);
-}
-
-// Brings the page up, or puts it away, and remembers it either way: it stays
-// up from one track to the next.
-static void lyrics_commit(bool on) {
-	lyrics_wanted = on;
-	device_state_t state;
-	device_state_get(&state);
-	lyrics_allowed = on && playing_local_file(&state);
-	lyrics_now = lyrics_allowed && lyrics_has_words();
-	if (lyrics_now) {
-		lyrics_slide_to(LYRICS_FULL);
-		lyrics_request(&state);
-		lyrics_follow(state.progress_current_secs);
-	} else {
-		lyrics_slide_to(0);
-	}
-}
-
-// The words for the file playing have been read: a page wanted and up stays
-// up if there are any and goes if there are none; one wanted and put away for
-// a track without words comes back on the first track that has some.
-static void lyrics_settle(void) {
-	bool now = lyrics_allowed && lyrics_has_words();
-	if (now == lyrics_now || !lyrics_pane) {
-		return;
-	}
-	lyrics_now = now;
-	lyrics_slide_to(now ? LYRICS_FULL : 0);
-	if (now) {
-		device_state_t state;
-		device_state_get(&state);
-		lyrics_follow(state.progress_current_secs);
+		player_lyrics_set_offset_ms(lyrics_offset_ms + delta);
 	}
 }
 
 // ---------------------------------------------------------------------------
-// Words from LRCLIB, for a file with none
+// LRCLIB Search & Wi-Fi Assist (Preserved)
 // ---------------------------------------------------------------------------
 
 typedef struct {
@@ -2010,7 +3024,13 @@ typedef struct {
 	int count;
 } lyrics_fetch_t;
 
-static bool lyrics_fetching; // one search at a time
+static bool lyrics_fetching;
+
+#define LYRICS_WIFI_POLL_MS 500
+#define LYRICS_WIFI_WAIT_MS 30000
+static lv_timer_t *lyrics_wifi_timer;
+static uint32_t lyrics_wifi_since;
+static char lyrics_wifi_path[1024];
 
 void player_lyrics_reload(const char *path) {
 	device_state_t state;
@@ -2018,14 +3038,10 @@ void player_lyrics_reload(const char *path) {
 	if (!path || strcmp(state.current_file, path) != 0) {
 		return;
 	}
-	// Read again, from the .lrc now beside the file. Words that were up stay up
-	// and change in place; otherwise the page is wanted, and comes in when the
-	// words arrive (lyrics_settle()).
-	bool up = lyrics_now;
 	lyrics_path[0] = '\0';
 	lyrics_request(&state);
-	if (!up) {
-		lyrics_commit(true);
+	if (lyrics_state == LYRICS_VIEW_NONE) {
+		lyrics_set_mode(LYRICS_VIEW_INTEGRATED, true);
 	}
 }
 
@@ -2036,11 +3052,12 @@ static void lyrics_fetched(void *user) {
 
 	switch (job->result) {
 	case LRCLIB_OK: {
-		// The list is for the track it was asked about, over the player it was
-		// asked from; with either gone it is no longer wanted.
 		device_state_t state;
 		device_state_get(&state);
 		if (sheet_open && strcmp(state.current_file, job->path) == 0) {
+			if (lyrics_state == LYRICS_VIEW_FULLSCREEN) {
+				lyrics_set_mode(LYRICS_VIEW_INTEGRATED, false);
+			}
 			lyricsearch_open(job->path, job->records, job->count);
 			job->records = NULL;
 		}
@@ -2073,23 +3090,6 @@ static void *lyrics_fetch_worker(void *arg) {
 	return NULL;
 }
 
-static void lyrics_search_run(void);
-
-// ---------------------------------------------------------------------------
-// Wi-Fi switched on for a search
-//
-// With Wi-Fi off the question offers to switch it on instead of searching; the
-// search then starts by itself once the link has an address, for the file that
-// was playing when the question was answered.
-// ---------------------------------------------------------------------------
-
-#define LYRICS_WIFI_POLL_MS 500
-#define LYRICS_WIFI_WAIT_MS 30000
-
-static lv_timer_t *lyrics_wifi_timer;
-static uint32_t lyrics_wifi_since;
-static char lyrics_wifi_path[1024];
-
 static bool lyrics_wifi_online(void) {
 	wifi_status_t wifi;
 	wifi_get_status(&wifi);
@@ -2103,11 +3103,12 @@ static void lyrics_wifi_wait_end(void) {
 	}
 }
 
+static void lyrics_search_run(void);
+
 static void lyrics_wifi_tick_cb(lv_timer_t *t) {
 	(void)t;
 	device_state_t state;
 	device_state_get(&state);
-	// Another track, or Wi-Fi switched off again: the search is no longer wanted.
 	if (!wifi_get_enabled() || strcmp(state.current_file, lyrics_wifi_path) != 0) {
 		lyrics_wifi_wait_end();
 		toast_busy_end();
@@ -2142,8 +3143,6 @@ static void lyrics_enable_wifi_cb(void *user) {
 	toast_busy_dismissable("lyrics_wifi_connecting");
 }
 
-// Wi-Fi is off and can be switched on: the question offers that in place of
-// the search.
 static bool lyrics_offer_wifi(void) {
 	if (lyrics_wifi_timer) {
 		toast_busy_dismissable("lyrics_wifi_connecting");
@@ -2154,15 +3153,6 @@ static bool lyrics_offer_wifi(void) {
 	}
 	confirm_show("lyrics_download_title", "lyrics_wifi_off_note", "lyrics_enable_wifi", lyrics_enable_wifi_cb, NULL);
 	return true;
-}
-
-// The file playing looked up on LRCLIB, on a thread of its own; what is found
-// is listed to pick from.
-static void lyrics_search_start(void) {
-	if (!lyrics_fetching && lyrics_offer_wifi()) {
-		return;
-	}
-	lyrics_search_run();
 }
 
 static void lyrics_search_run(void) {
@@ -2188,9 +3178,8 @@ static void lyrics_search_run(void) {
 	}
 	snprintf(job->path, sizeof(job->path), "%s", state.current_file);
 	snprintf(job->title, sizeof(job->title), "%s", state.metadata.title);
-	// The track's own performer is who LRCLIB files it under; the album's
-	// artist only when the track names none.
-	snprintf(job->artist, sizeof(job->artist), "%s", state.metadata.artist[0] ? state.metadata.artist : state.metadata.album_artist);
+	snprintf(job->artist, sizeof(job->artist), "%s",
+			 state.metadata.artist[0] ? state.metadata.artist : state.metadata.album_artist);
 	snprintf(job->album, sizeof(job->album), "%s", state.metadata.album);
 	job->duration = (int)(state.progress_total_secs + 0.5);
 
@@ -2201,1346 +3190,46 @@ static void lyrics_search_run(void) {
 	}
 	pthread_detach(thread);
 	lyrics_fetching = true;
-	// A tap puts the spinner away while LRCLIB is asked again after a failure;
-	// the list still opens when the answer comes.
 	toast_busy_dismissable("lyrics_downloading");
 }
 
-// The answer to the question below.
-static void lyrics_download_cb(void *user) {
-	(void)user;
+static void lyrics_search_start(void) {
+	if (!lyrics_fetching && lyrics_offer_wifi()) {
+		return;
+	}
+	lyrics_search_run();
+}
+
+static void lyrics_find_btn_cb(lv_event_t *e) {
+	(void)e;
+	if (player_sheet_drag_active() || switcher_back_drag_active()) {
+		return;
+	}
 	lyrics_search_start();
 }
 
-// The button over the words: other words for the same file, in their place.
-static void lyrics_find_cb(lv_event_t *e) {
-	(void)e;
-	if (player_sheet_drag_active()) {
-		return;
-	}
-	lyrics_search_start();
-}
-
-// A swipe to the words of a file that has none.
-static void lyrics_offer_download(void) {
-	if (lyrics_fetching) {
-		toast_busy_dismissable("lyrics_downloading");
-		return;
-	}
-	if (lyrics_offer_wifi()) {
-		return;
-	}
-	confirm_show("lyrics_download_title", "lyrics_download_note", "lyrics_download", lyrics_download_cb, NULL);
-}
-
-// The swipe that pulls the page in (on the sleeve, right to left) or pushes it
-// out (on the words, left to right). `opening` is the user data. Sideways
-// only: a movement that reads as vertical is the column being scrolled, and
-// a swipe the other way on the sleeve is the player being put away.
-static bool lyrics_swiped; // the release that ends a swipe is not a tap on a line
-
-static void lyrics_swiped_clear_cb(void *unused) {
-	(void)unused;
-	lyrics_swiped = false;
-}
-
-static void lyrics_drag_cb(lv_event_t *e) {
-	static lv_point_t start;
-	static bool tracking;
-	static bool engaged;
-	static bool asking; // no words to pull in: the swipe offers to download them
-
-	bool opening = (bool)(uintptr_t)lv_event_get_user_data(e);
-	lv_event_code_t code = lv_event_get_code(e);
-	lv_indev_t *indev = lv_indev_active();
-	if (!indev || !lyrics_pane) {
-		return;
-	}
-
-	if (code == LV_EVENT_PRESSED) {
-		tracking = opening ? !lyrics_now && lyrics_available() && lyrics_loaded : lyrics_now;
-		asking = opening && !lyrics_has_words();
-		engaged = false;
-		lv_indev_get_point(indev, &start);
-		return;
-	}
-	if (!tracking) {
-		return;
-	}
-
-	lv_point_t p;
-	lv_indev_get_point(indev, &p);
-	int dx = p.x - start.x;
-	int dy = p.y - start.y;
-
-	if (code == LV_EVENT_PRESSING) {
-		if (!engaged) {
-			if (lv_indev_get_scroll_obj(indev)) {
-				tracking = false; // the column is being scrolled
-				return;
-			}
-			if (LV_ABS(dy) >= LYRICS_DRAG_PX && LV_ABS(dy) > LV_ABS(dx)) {
-				tracking = false;
-				return;
-			}
-			if (LV_ABS(dx) < LYRICS_DRAG_PX || LV_ABS(dx) < 2 * LV_ABS(dy)) {
-				return;
-			}
-			if ((opening && dx > 0) || (!opening && dx < 0)) {
-				tracking = false; // the other way: not this gesture
-				return;
-			}
-			engaged = true;
-			lyrics_swiped = true;
-			if (asking) {
-				return; // the sleeve stays: there is no page to bring
-			}
-			lv_anim_delete(lyrics_pane, lyrics_progress_exec);
-			lyrics_fade(false);
-			if (opening) {
-				lyrics_progress_apply(1); // up, so the request below finds it on screen
-				device_state_t state;
-				device_state_get(&state);
-				lyrics_request(&state);
-				lyrics_follow(state.progress_current_secs);
-			}
-		}
-		if (asking) {
-			return;
-		}
-		int32_t moved = (int32_t)dx * LYRICS_FULL / cover_box_w;
-		lyrics_progress_apply(opening ? -moved : LYRICS_FULL - moved);
-		return;
-	}
-
-	if (code == LV_EVENT_RELEASED || code == LV_EVENT_PRESS_LOST) {
-		tracking = false;
-		if (!engaged) {
-			return;
-		}
-		engaged = false;
-		bool far = LV_ABS(dx) > cover_box_w / LYRICS_COMMIT_FRACTION;
-		if (asking) {
-			if (far) {
-				lyrics_offer_download();
-			}
-		} else {
-			lyrics_commit(opening ? far : !far);
-		}
-		// Cleared after this gesture's CLICKED has been seen, as for the sheet.
-		lv_async_call(lyrics_swiped_clear_cb, NULL);
-	}
-}
-
-// A tap on a timed line plays from where it is sung.
-static void lyrics_tap_cb(lv_event_t *e) {
-	(void)e;
-	if (lyrics_swiped || !lyrics_cur.synced || !lyrics_view) {
-		return;
-	}
-	lv_indev_t *indev = lv_indev_active();
-	if (!indev) {
-		return;
-	}
-	lv_point_t p;
-	lv_indev_get_point(indev, &p);
-	uint32_t count = lv_obj_get_child_count(lyrics_view);
-	for (uint32_t i = 0; i < count && i < (uint32_t)lyrics_cur.count; i++) {
-		lv_area_t area;
-		lv_obj_get_coords(lv_obj_get_child(lyrics_view, i), &area);
-		// The gap between two lines belongs to the one above it.
-		if (p.y >= area.y1 && p.y <= area.y2 + LYRICS_LINE_GAP) {
-			int32_t ms = lyrics_cur.lines[i].ms;
-			if (ms < 0) {
-				return;
-			}
-			device_state_seek((double)ms / 1000.0);
-			// Back to following at once: the finger chose this line.
-			lyrics_user_until = 0;
-			lyrics_centred = false;
-			lyrics_follow((double)ms / 1000.0);
-			lyrics_tap_ms = ms;
-			lyrics_tap_until = lv_tick_get() + LYRICS_TAP_WAIT_MS;
-			return;
-		}
-	}
-}
-
-static void lyrics_build(void) {
-	lyrics_pane = lv_obj_create(cover_panel);
-	lv_obj_remove_style_all(lyrics_pane);
-	lv_obj_set_ignore_layout(lyrics_pane, true);
-	lv_obj_set_scrollable(lyrics_pane, false);
-	// Presses on the page outside the column go to the sleeve under it.
-	lv_obj_set_clickable(lyrics_pane, false);
-	lv_obj_set_hidden(lyrics_pane, true);
-
-	lyrics_view = lv_obj_create(lyrics_pane);
-	lv_obj_remove_style_all(lyrics_view);
-	lv_obj_set_ignore_layout(lyrics_view, true);
-	lv_obj_set_flex_flow(lyrics_view, LV_FLEX_FLOW_COLUMN);
-	lv_obj_set_flex_align(lyrics_view, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
-	lv_obj_set_style_pad_row(lyrics_view, LYRICS_LINE_GAP, 0);
-	lv_obj_set_style_pad_hor(lyrics_view, 8, 0);
-	lv_obj_set_scroll_dir(lyrics_view, LV_DIR_VER);
-	lv_obj_set_scrollbar_mode(lyrics_view, LV_SCROLLBAR_MODE_OFF);
-	lv_obj_add_event_cb(lyrics_view, lyrics_scroll_cb, LV_EVENT_SCROLL_BEGIN, NULL);
-	lv_obj_add_event_cb(lyrics_view, lyrics_tap_cb, LV_EVENT_CLICKED, NULL);
-	lv_obj_add_event_cb(lyrics_view, lyrics_drag_cb, LV_EVENT_PRESSED, (void *)(uintptr_t) false);
-	lv_obj_add_event_cb(lyrics_view, lyrics_drag_cb, LV_EVENT_PRESSING, (void *)(uintptr_t) false);
-	lv_obj_add_event_cb(lyrics_view, lyrics_drag_cb, LV_EVENT_RELEASED, (void *)(uintptr_t) false);
-	lv_obj_add_event_cb(lyrics_view, lyrics_drag_cb, LV_EVENT_PRESS_LOST, (void *)(uintptr_t) false);
-
-	lyrics_note = lv_label_create(lyrics_pane);
-	lv_obj_set_ignore_layout(lyrics_note, true);
-	lv_label_set_long_mode(lyrics_note, LV_LABEL_LONG_WRAP);
-	lv_obj_set_style_text_align(lyrics_note, LV_TEXT_ALIGN_CENTER, 0);
-	lv_obj_set_style_text_font(lyrics_note, &font_ui_24, 0);
-	lv_obj_set_style_text_color(lyrics_note, lv_color_white(), 0);
-	lv_obj_set_style_text_opa(lyrics_note, LV_OPA_70, 0);
-	lv_obj_set_hidden(lyrics_note, true);
-
-	// The title and artist at the top, Studio's head, over the whole screen and
-	// above the sleeve. Copies of the two in the row below, which keeps its
-	// place so the controls do not move.
-	lyrics_head = lv_obj_create(player_screen);
-	lv_obj_remove_style_all(lyrics_head);
-	lv_obj_set_ignore_layout(lyrics_head, true);
-	lv_obj_set_scrollable(lyrics_head, false);
-	lv_obj_set_clickable(lyrics_head, false);
-	lv_obj_set_hidden(lyrics_head, true);
-
-	lv_obj_t *col = lv_obj_create(lyrics_head);
-	lyrics_head_col = col;
-	lv_obj_remove_style_all(col);
-	lv_obj_set_size(col, cover_box_w - 2 * STUDIO_MARGIN - 2 * 68, LV_SIZE_CONTENT);
-	lv_obj_align(col, LV_ALIGN_CENTER, 0, 0);
-	lv_obj_set_flex_flow(col, LV_FLEX_FLOW_COLUMN);
-	lv_obj_set_flex_align(col, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
-	lv_obj_set_style_pad_row(col, 4, 0);
-	lv_obj_set_scrollable(col, false);
-	lv_obj_set_clickable(col, false);
-
-	lyrics_head_title = lv_label_create(col);
-	lv_obj_set_width(lyrics_head_title, lv_pct(100));
-	lv_obj_set_style_text_align(lyrics_head_title, LV_TEXT_ALIGN_CENTER, 0);
-	lv_obj_set_style_text_font(lyrics_head_title, lv_obj_get_style_text_font(song_title_label, 0), 0);
-	lv_obj_set_style_text_color(lyrics_head_title, lv_color_white(), 0);
-	scrolltext_apply(lyrics_head_title);
-
-	lyrics_head_artist = lv_label_create(col);
-	lv_obj_set_width(lyrics_head_artist, lv_pct(100));
-	lv_obj_set_style_text_align(lyrics_head_artist, LV_TEXT_ALIGN_CENTER, 0);
-	lv_obj_set_style_text_font(lyrics_head_artist, lv_obj_get_style_text_font(song_artist_label, 0), 0);
-	lv_obj_set_style_text_color(lyrics_head_artist, lv_color_make(200, 200, 200), 0);
-	scrolltext_apply(lyrics_head_artist);
-
-	lyrics_find_btn = lv_btn_create(player_screen);
-	lv_obj_set_ignore_layout(lyrics_find_btn, true);
-	lv_obj_set_size(lyrics_find_btn, LYRICS_FIND_BTN, LYRICS_FIND_BTN);
-	lv_obj_set_style_bg_opa(lyrics_find_btn, LV_OPA_TRANSP, 0);
-	lv_obj_set_style_shadow_width(lyrics_find_btn, 0, 0);
-	lv_obj_set_style_border_width(lyrics_find_btn, 0, 0);
-	lv_obj_set_ext_click_area(lyrics_find_btn, CORNER_BTN_EXT_CLICK);
-	lv_obj_add_event_cb(lyrics_find_btn, lyrics_find_cb, LV_EVENT_CLICKED, NULL);
-	lv_obj_set_hidden(lyrics_find_btn, true);
-	lyrics_find_icon = lv_image_create(lyrics_find_btn);
-	lv_image_set_src(lyrics_find_icon, &icon_lyrics_search);
-	lv_obj_add_style(lyrics_find_icon, &theme_style_icon, 0);
-	lv_obj_set_style_image_recolor_opa(lyrics_find_icon, LV_OPA_COVER, 0);
-	lv_obj_center(lyrics_find_icon);
-
-	// The sleeve is where the page is pulled in from.
-	lv_obj_add_event_cb(cover_panel, lyrics_drag_cb, LV_EVENT_PRESSED, (void *)(uintptr_t) true);
-	lv_obj_add_event_cb(cover_panel, lyrics_drag_cb, LV_EVENT_PRESSING, (void *)(uintptr_t) true);
-	lv_obj_add_event_cb(cover_panel, lyrics_drag_cb, LV_EVENT_RELEASED, (void *)(uintptr_t) true);
-	lv_obj_add_event_cb(cover_panel, lyrics_drag_cb, LV_EVENT_PRESS_LOST, (void *)(uintptr_t) true);
-}
-
-// Studio's background for the other two arrangements -- the sleeve blurred at
-// the shape of the screen, the right way up -- made off the interface thread
-// from a copy of the sleeve on screen: a few hundred milliseconds of this
-// processor, and it has to be ready before the words are first pulled in.
-typedef struct {
-	unsigned generation;
-	int w, h; // the screen
-	cover_image_t src;
-	cover_image_t out;
-} lyrics_bg_job_t;
-
-static void lyrics_bg_arrived(void *user) {
-	lyrics_bg_job_t *job = user;
-	if (job->generation == lyrics_bg_generation && job->out.pixels) {
-		cover_free(&lyrics_screen_pic);
-		lyrics_screen_pic = job->out;
-		lyrics_screen_pic.dsc.data = lyrics_screen_pic.pixels; // struct moved, buffer didn't
-		if (lyrics_progress > 0) {
-			lyrics_look(true);
-		}
-	} else {
-		cover_free(&job->out);
-	}
-	free(job);
-}
-
-static void *lyrics_bg_worker(void *arg) {
-	lyrics_bg_job_t *job = arg;
-	cover_blur_fill(&job->src, job->w, job->h, &job->out);
-	cover_free(&job->src);
-	if (!gui_post(lyrics_bg_arrived, job)) {
-		cover_free(&job->out);
-		free(job);
-	}
-	return NULL;
-}
-
-// Drops the blur that belongs to the sleeve going away, and Studio's look
-// with it while the words are up.
-static void lyrics_bg_forget(void) {
-	lyrics_bg_generation++;
-	if (lyrics_look_on && !layout_studio_now) {
-		lyrics_look(false);
-	}
-	if (!layout_studio_now && studio_bg && lv_image_get_src(studio_bg) == &lyrics_screen_pic.dsc) {
-		lv_image_set_src(studio_bg, NULL);
-	}
-	cover_free(&lyrics_screen_pic);
-}
-
-// Starts the blur of the sleeve just put up. Not in Studio, which has its own
-// blurred copy behind the whole screen already.
-static void lyrics_bg_prepare(void) {
-	if (layout_studio_now || !current_cover.pixels) {
-		return;
-	}
-	lyrics_bg_job_t *job = calloc(1, sizeof(*job));
-	if (!job) {
-		return;
-	}
-	size_t size = current_cover.dsc.data_size;
-	job->src = current_cover;
-	job->src.pixels = malloc(size);
-	if (!job->src.pixels) {
-		free(job);
-		return;
-	}
-	memcpy(job->src.pixels, current_cover.pixels, size);
-	job->src.dsc.data = job->src.pixels;
-	job->generation = lyrics_bg_generation;
-	job->w = (int)lv_obj_get_width(player_screen);
-	job->h = (int)lv_obj_get_height(player_screen);
-
-	pthread_t thread;
-	if (pthread_create(&thread, NULL, lyrics_bg_worker, job) == 0) {
-		pthread_detach(thread);
-	} else {
-		cover_free(&job->src);
-		free(job);
-	}
-}
-
-// Which of the four quality marks belongs to what is playing.
-//
-// Asked of the stream and not of the library, so a radio station and a track
-// still downloading are answered as well as a file that has been indexed.
-//
-// A podcast gets none of them. The marks rank an encoding against what music
-// needs, and an episode is speech at whatever bitrate the publisher chose:
-// "lossy" beside it is true and says nothing anyone would act on.
-static const lv_image_dsc_t *studio_quality_mark(const device_state_t *state) {
-	if (!state->live && podcastcache_is_episode(state->current_file)) {
-		return NULL;
-	}
-	if (audio_get_dsd_multiple() > 0) {
-		return &icon_quality_dsd;
-	}
-	if (state->live || audio_stream_is_lossy()) {
-		return &icon_quality_lossy;
-	}
-	int rate = 0, channels = 0;
-	audio_get_stream_info(&rate, &channels);
-	int bits = audio_get_stream_bits();
-	// CD is 16 bit at 44.1 kHz or below, as in the library lists
-	// (library_track_quality); 48 kHz and up is Hi-Res.
-	if (rate > 44100 || bits > 16) {
-		return &icon_quality_hifi;
-	}
-	if (rate > 0) {
-		return &icon_quality_cd;
-	}
-	return NULL;
-}
-
-// The top of the sleeve, and how large it is.
-//
-// The sleeve is as large as the narrower of the two constraints allows: the
-// width left between the margins, and the height left between the head and the
-// line under it, which on this panel is what decides.
-//
-// Worked out from the numbers rather than from the widgets, so it can be asked
-// before the panel has been laid out -- which is where the artwork is ordered
-// at the size this arrangement will draw it.
-static int studio_cover_geometry(int *top_out) {
-	int head_top = back_btn_centre_y() - STUDIO_HEAD_H / 2;
-	if (head_top < 2) {
-		head_top = 2;
-	}
-
-	int top = head_top + STUDIO_HEAD_H + STUDIO_COVER_GAP;
-	// Never wider than STUDIO_COVER_MAX_PCT of the panel: where the height
-	// allows the full width (the R1), a sleeve from edge to edge crowds the
-	// title above it and reads as the standard arrangement.
-	int size = studio_box_w * STUDIO_COVER_MAX_PCT / 100;
-	int room = studio_box_h - top - STUDIO_QUALITY_GAP - STUDIO_QUALITY_H - STUDIO_BOTTOM;
-	if (size > room) {
-		size = room;
-	}
-	if (size < 64) {
-		size = 64;
-	}
-	if (top_out) {
-		*top_out = top + (room - size) / 2;
-	}
-	return size;
-}
-
-// The four marks that say where a track comes from -- Qobuz, Tidal, podcast,
-// and the red one for a live stream -- share the top right corner of the
-// artwork, which in this arrangement is where the ellipsis went. They move
-// down under it and keep its right edge, so the two read as one column.
-//
-// `parent` of NULL leaves them where they are and only re-places them, which
-// is what studio_place() wants on a relayout.
-static void studio_badges_move(lv_obj_t *parent, int y) {
-	lv_obj_t *const marks[] = {live_badge, qobuz_badge, tidal_badge, podcast_badge};
-	for (size_t i = 0; i < sizeof(marks) / sizeof(marks[0]); i++) {
-		if (!marks[i]) {
-			continue;
-		}
-		if (parent) {
-			lv_obj_set_parent(marks[i], parent);
-		}
-		lv_obj_align(marks[i], LV_ALIGN_TOP_RIGHT, -STUDIO_MARGIN, y);
-	}
-}
-
-// Where everything goes.
-static void studio_place(void) {
-	if (!studio_box) {
-		return;
-	}
-
-	int screen_w = studio_box_w;
-	int head_top = back_btn_centre_y() - STUDIO_HEAD_H / 2;
-	if (head_top < 2) {
-		head_top = 2;
-	}
-
-	int cover_y = 0;
-	int size = studio_cover_geometry(&cover_y);
-	studio_cover_size = size;
-
-	int cover_x = (screen_w - size) / 2;
-
-	lv_obj_set_pos(studio_head, STUDIO_MARGIN, head_top);
-	lv_obj_set_size(studio_head, screen_w - 2 * STUDIO_MARGIN, STUDIO_HEAD_H);
-
-	studio_badges_move(NULL, head_top + STUDIO_HEAD_H + STUDIO_BADGE_GAP);
-
-	lv_obj_set_size(studio_cover, size, size);
-	lv_obj_set_pos(studio_cover, cover_x, cover_y);
-
-	// The same square, so a track with no artwork keeps the arrangement rather
-	// than leaving a bare screen.
-	lv_obj_set_size(studio_empty, size, size);
-	lv_obj_set_pos(studio_empty, cover_x, cover_y);
-
-	lv_obj_set_size(studio_quality, size, STUDIO_QUALITY_H);
-	lv_obj_set_pos(studio_quality, cover_x, cover_y + size + STUDIO_QUALITY_GAP);
-
-	lyrics_layout();
-}
-
-// Points the sleeve and the background at the pictures the page already holds.
-static void studio_refresh_cover(void) {
-	if (!studio_cover) {
-		return;
-	}
-	bool have = current_cover.pixels != NULL;
-	lv_image_set_src(studio_cover, have ? &current_cover.dsc : NULL);
-	if (have) {
-		lv_obj_set_hidden(studio_cover, false);
-	} else {
-		lv_obj_set_hidden(studio_cover, true);
-	}
-
-	// One of the two squares is always up. Without this a track with no artwork
-	// left the arrangement with nothing in it at all: no sleeve, no blurred
-	// background behind it, and the page's own colour across the whole screen.
-	if (studio_empty) {
-		if (have) {
-			lv_obj_set_hidden(studio_empty, true);
-		} else {
-			lv_obj_set_hidden(studio_empty, false);
-		}
-	}
-	if (studio_empty_icon) {
-		// The same mark the full-width cover panel stands in with: the note, the
-		// headphones for a book, the aerial for a station.
-		lv_image_set_src(studio_empty_icon, lv_image_get_src(cover_placeholder_icon));
-		lv_obj_set_style_image_recolor(studio_empty_icon, theme()->text_secondary, 0);
-	}
-
-	if (studio_bg) {
-		lv_image_set_src(studio_bg, current_backdrop.pixels ? &current_backdrop.dsc : NULL);
-		if (current_backdrop.pixels) {
-			lv_obj_set_hidden(studio_bg, false);
-		} else {
-			lv_obj_set_hidden(studio_bg, true);
-		}
-	}
-}
-
-// In the standard arrangement the title is lowered until the middle of its
-// capitals meets the middle of the star beside it. Only the title moves: the
-// star, the format under it and the artist stay where the row puts them, and a
-// translation is not layout, so nothing else on the page moves either. The
-// middle of the capitals is read from the font, so it holds at either text
-// size. In the pills, in Studio, and beside no star (a book), the title is not
-// moved.
-static void align_title_with_star(void) {
-	if (!song_title_label) {
-		return;
-	}
-	int32_t shift = 0;
-	if (song_text_obj && song_side_obj && fav_btn_obj && lv_obj_get_parent(song_title_label) == song_text_obj &&
-		lv_obj_get_parent(fav_btn_obj) == song_side_obj && !lv_obj_is_hidden(fav_btn_obj) &&
-		!lv_obj_is_hidden(song_side_obj)) {
-		const lv_font_t *font = lv_obj_get_style_text_font(song_title_label, 0);
-		int32_t line = lv_font_get_line_height(font);
-		int32_t title_mid = line / 2;
-		lv_font_glyph_dsc_t g;
-		if (lv_font_get_glyph_dsc(font, &g, 'H', 0) && g.box_h > 0) {
-			// A glyph's box is placed box_h + ofs_y above the baseline, which is
-			// base_line up from the bottom of the line.
-			int32_t cap_top = line - font->base_line - g.box_h - g.ofs_y;
-			title_mid = cap_top + g.box_h / 2;
-		}
-		// Where the row put the title, without the shift already on it.
-		lv_area_t title, star;
-		lv_obj_get_coords(song_title_label, &title);
-		lv_obj_get_coords(fav_btn_obj, &star);
-		int32_t title_top = title.y1 - lv_obj_get_style_translate_y(song_title_label, 0) +
-							lv_obj_get_style_pad_top(song_title_label, 0);
-		shift = (star.y1 + star.y2) / 2 - (title_top + title_mid);
-	}
-	// Only when it changes: a new translation lays the column out again, and
-	// that comes back here.
-	if (lv_obj_get_style_translate_y(song_title_label, 0) != shift) {
-		lv_obj_set_style_translate_y(song_title_label, shift, 0);
-	}
-}
-
-static void song_info_layout_cb(lv_event_t *e) {
-	(void)e;
-	align_title_with_star();
-}
-
-// Puts the ellipsis and the star back where every other arrangement keeps them,
-// and takes the panel down. Called before each arrangement is laid out, so the
-// two that know nothing about Studio find the page as they left it.
-static void studio_take_back(void) {
-	if (!studio_box) {
-		return;
-	}
-	lv_obj_set_hidden(studio_box, true);
-	if (studio_bg) {
-		lv_obj_set_hidden(studio_bg, true);
-	}
-	if (studio_empty) {
-		lv_obj_set_hidden(studio_empty, true);
-	}
-
-	// The surfaces this arrangement made transparent, and the light chrome that
-	// goes with the blurred sleeve. Only put back by the arrangement that took
-	// them away: every other path leaves the cover to decide, as it always has.
-	if (studio_up) {
-		studio_up = false;
-		lv_obj_remove_local_style_prop(cover_panel, LV_STYLE_BG_OPA, 0);
-		lv_obj_set_height(cover_panel, cover_box_h);
-		if (player_menu) {
-			lv_obj_remove_local_style_prop(player_menu, LV_STYLE_BG_OPA, 0);
-			lv_obj_remove_local_style_prop(player_menu, LV_STYLE_BG_IMAGE_OPA, 0);
-			lv_obj_set_flex_align(player_menu, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
-			lv_obj_set_style_pad_ver(player_menu, menu_pad_ver, 0);
-			lv_obj_set_style_pad_gap(player_menu, menu_gap, 0);
-		}
-		// The picture at full width comes back, and the note with it when there
-		// is no picture. studio_up is already down, so cover_show() agrees.
-		cover_show(current_cover.pixels != NULL);
-		if (format_label && song_side_obj) {
-			lv_obj_set_parent(format_label, song_side_obj);
-			lv_obj_set_style_text_align(format_label, LV_TEXT_ALIGN_RIGHT, 0);
-		}
-		// The marks go back to the corner of the artwork they share with every
-		// other arrangement.
-		lv_obj_t *const marks[] = {live_badge, qobuz_badge, tidal_badge, podcast_badge};
-		for (size_t i = 0; i < sizeof(marks) / sizeof(marks[0]); i++) {
-			if (marks[i]) {
-				lv_obj_set_parent(marks[i], cover_panel);
-				lv_obj_align(marks[i], LV_ALIGN_TOP_RIGHT, -BADGE_INSET, badge_top());
-			}
-		}
-		set_over_cover(current_cover.pixels != NULL);
-	}
-
-	if (more_btn_obj && controls_row) {
-		lv_obj_set_parent(more_btn_obj, controls_row);
-		lv_obj_set_ignore_layout(more_btn_obj, true);
-		lv_obj_align(more_btn_obj, LV_ALIGN_RIGHT_MID, 0, 0);
-	}
-	if (fav_btn_obj) {
-		// Laid out by its row again: the next step decides which row that is.
-		lv_obj_set_ignore_layout(fav_btn_obj, false);
-	}
-}
-
-static void studio_put(void) {
-	if (!studio_box) {
-		return;
-	}
-
-	if (song_title_label) {
-		lv_obj_set_parent(song_title_label, studio_text_col);
-		lv_obj_move_to_index(song_title_label, 0);
-		lv_obj_set_width(song_title_label, lv_pct(100));
-		lv_obj_set_style_max_width(song_title_label, LV_COORD_MAX, 0);
-	}
-	if (song_artist_label) {
-		lv_obj_set_parent(song_artist_label, studio_text_col);
-		lv_obj_move_to_index(song_artist_label, 1);
-		lv_obj_set_width(song_artist_label, lv_pct(100));
-		lv_obj_set_style_max_width(song_artist_label, LV_COORD_MAX, 0);
-	}
-	lv_obj_set_hidden(song_text_obj, true);
-	if (song_side_obj) {
-		lv_obj_set_hidden(song_side_obj, true);
-	}
-
-	// The line under the sleeve is the same label the standard arrangement
-	// keeps beside the artist -- it already knows how to say "16/44.1 FLAC",
-	// "320 kbps MP3" and "DSD256", a station included. Moved, not copied.
-	if (format_label) {
-		lv_obj_set_parent(format_label, studio_quality);
-		lv_obj_set_hidden(format_label, false);
-		lv_obj_set_width(format_label, LV_SIZE_CONTENT);
-		lv_obj_set_style_text_align(format_label, LV_TEXT_ALIGN_LEFT, 0);
-	}
-
-	// The two buttons change places: the ellipsis belongs beside the title it
-	// is about, and the star takes the corner of the transport row it left.
-	if (more_btn_obj && studio_head) {
-		lv_obj_set_parent(more_btn_obj, studio_head);
-		lv_obj_set_ignore_layout(more_btn_obj, true);
-		lv_obj_align(more_btn_obj, LV_ALIGN_RIGHT_MID, 0, 0);
-	}
-	if (fav_btn_obj && controls_row) {
-		lv_obj_set_parent(fav_btn_obj, controls_row);
-		lv_obj_set_ignore_layout(fav_btn_obj, true);
-		lv_obj_align(fav_btn_obj, LV_ALIGN_RIGHT_MID, 0, 0);
-	}
-
-	// Onto the panel, so they draw over the sleeve rather than under it, and
-	// below the ellipsis. studio_place() settles where.
-	studio_badges_move(studio_box, 0);
-
-	// The blurred sleeve is the whole background here, so everything that would
-	// otherwise cover it gets out of the way: the two panels' own fills, the
-	// picture at full width, and the note that stands in for it.
-	studio_up = true;
-	lv_obj_set_style_bg_opa(cover_panel, LV_OPA_TRANSP, 0);
-	// The panel with the sleeve reaches down over the top of the controls
-	// block, which in this arrangement holds its rows at the bottom. Grown
-	// rather than left to overflow: a band of the screen redrawn below the
-	// panel's own area would skip it and cut the sleeve off.
-	lv_obj_set_height(cover_panel, studio_box_h);
-	if (player_menu) {
-		lv_obj_set_flex_align(player_menu, LV_FLEX_ALIGN_END, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
-		lv_obj_set_style_pad_ver(player_menu, PLAYER_MENU_PAD_VER, 0);
-		lv_obj_set_style_pad_gap(player_menu, menu_gap, 0);
-		lv_obj_set_style_bg_opa(player_menu, LV_OPA_TRANSP, 0);
-		// Its own blurred copy too: it is the same picture at a different crop,
-		// and two of them meeting at the controls is a seam across the screen.
-		lv_obj_set_style_bg_image_opa(player_menu, LV_OPA_TRANSP, 0);
-	}
-	cover_show(current_cover.pixels != NULL);
-
-	lv_obj_set_hidden(studio_box, false);
-	lv_obj_move_foreground(studio_box);
-	if (studio_bg) {
-		lv_obj_move_background(studio_bg);
-	}
-	studio_place();
-	studio_refresh_cover();
-}
-
-// Moves the pieces between the two arrangements.
-//
-// Reparenting and not rebuilding: the title label carries its scrolling, the
-// star carries what it does when pressed, and copying either of them would be
-// copying behaviour.
-static void apply_layout(void) {
-	if (!alt_title_pill || !song_text_obj) {
-		return;
-	}
-
-	// Always first: the two arrangements below know nothing about Studio, so
-	// they have to find the ellipsis and the star where they left them.
-	studio_take_back();
-
-	if (layout_alt_now) {
-		// A pill each, and not one pill with two lines in it: the title and the
-		// album's artist are two different things, a single box around both
-		// pads the shorter one out to the length of the longer, and each has to
-		// be able to scroll on its own.
-		//
-		// The labels are a percentage of their parent in the standard layout,
-		// and a percentage of a parent that is itself sized by its contents is
-		// nothing at all. Here they size themselves -- so each pill ends where
-		// its own text ends -- up to what is left of the sleeve once the star's
-		// disc and the margins are taken off.
-		int room = cover_box_w - 2 * ALT_PAD - ALT_FAV_SIZE - 2 * ALT_PILL_PAD_H - 24;
-		if (song_title_label) {
-			lv_obj_set_parent(song_title_label, alt_title_pill);
-			lv_obj_set_width(song_title_label, LV_SIZE_CONTENT);
-			lv_obj_set_style_max_width(song_title_label, room, 0);
-		}
-		if (song_artist_label) {
-			lv_obj_set_parent(song_artist_label, alt_artist_pill);
-			lv_obj_set_width(song_artist_label, LV_SIZE_CONTENT);
-			lv_obj_set_style_max_width(song_artist_label, room, 0);
-		}
-
-		if (fav_btn_obj && alt_fav_circle) {
-			lv_obj_set_parent(fav_btn_obj, alt_fav_circle);
-			lv_obj_center(fav_btn_obj);
-		}
-		if (format_label) {
-			lv_obj_set_hidden(format_label, true); // the sleeve is not the place for a bitrate
-		}
-		if (song_side_obj) {
-			lv_obj_set_hidden(song_side_obj, true);
-		}
-		lv_obj_set_hidden(song_text_obj, true); // empty now, and it would still take a row
-
-		lv_obj_set_hidden(alt_text_col, false);
-		lv_obj_set_hidden(alt_fav_circle, false);
-		// Over the sleeve and not under it: both were built before the picture
-		// so that the picture would not have to be rebuilt around them.
-		lv_obj_move_foreground(alt_text_col);
-		lv_obj_move_foreground(alt_fav_circle);
-		if (wave_canvas) {
-			lv_obj_set_hidden(wave_box, false);
-			lv_obj_move_to_index(wave_box, lv_obj_get_index(progress_slider));
-			slider_over_waveform(true);
-		}
-	} else {
-		if (song_title_label) {
-			lv_obj_set_parent(song_title_label, song_text_obj);
-			lv_obj_move_to_index(song_title_label, 0);
-			lv_obj_set_width(song_title_label, lv_pct(100));
-			lv_obj_set_style_max_width(song_title_label, LV_COORD_MAX, 0);
-		}
-		if (song_artist_label) {
-			lv_obj_set_parent(song_artist_label, song_text_obj);
-			lv_obj_move_to_index(song_artist_label, 1);
-			lv_obj_set_width(song_artist_label, lv_pct(100));
-			lv_obj_set_style_max_width(song_artist_label, LV_COORD_MAX, 0);
-		}
-		lv_obj_set_hidden(song_text_obj, false);
-
-		if (fav_btn_obj && song_side_obj) {
-			lv_obj_set_parent(fav_btn_obj, song_side_obj);
-			lv_obj_move_to_index(fav_btn_obj, 0);
-		}
-		if (format_label) {
-			lv_obj_set_hidden(format_label, false);
-		}
-		if (song_side_obj) {
-			lv_obj_set_hidden(song_side_obj, false);
-		}
-
-		lv_obj_set_hidden(alt_text_col, true);
-		lv_obj_set_hidden(alt_fav_circle, true);
-		if (layout_wave_now && wave_canvas) {
-			lv_obj_set_hidden(wave_box, false);
-			lv_obj_move_to_index(wave_box, lv_obj_get_index(progress_slider));
-			slider_over_waveform(true);
-		} else {
-			slider_over_waveform(false);
-			if (wave_box) {
-				lv_obj_set_hidden(wave_box, true);
-			}
-		}
-	}
-
-	// Bigger targets in this arrangement. The star's button is as big as the
-	// disc it sits in, which is what a finger aims at; a press beyond the disc
-	// could not reach it anyway, since LVGL looks for a child only inside its
-	// parent.
-	if (fav_btn_obj) {
-		lv_obj_set_size(fav_btn_obj, layout_alt_now ? ALT_FAV_SIZE : FAV_BTN_W, layout_alt_now ? ALT_FAV_SIZE : FAV_BTN_H);
-	}
-	lv_obj_t *const transport[] = {prev_btn_obj, play_btn, next_btn_obj};
-	for (size_t i = 0; i < sizeof(transport) / sizeof(transport[0]); i++) {
-		if (transport[i]) {
-			lv_obj_set_ext_click_area(transport[i], layout_alt_now ? ALT_EXT_CLICK : 0);
-		}
-	}
-
-	if (layout_studio_now) {
-		studio_put();
-	} else {
-		lyrics_layout(); // studio_put() places the page itself
-	}
-	align_title_with_star(); // the title may have just left its row, or come back to it
-
-	paint_alt_tint();
-	bar_over_player_update(); // Studio's bar blurs nothing of its own
-}
-
-// Decides which arrangement the thing now playing gets, and moves the pieces
-// only if the answer changed.
-//
-// Called from every now-playing refresh and from the live-mode watch in the
-// poll, which is what makes the arrangement follow the source instead of being
-// settled once at startup. It has to run on the way out of a stream as well as
-// on the way in, or the ordinary progress bar is left behind on top of the
-// waveform: the bar's parent, size and transparency are decided here and
-// nowhere else.
-static void update_layout(const device_state_t *state) {
-	// Studio only wants a picture and a name, and takes whatever is playing:
-	// a file, a cached Qobuz or Tidal track, a podcast, a book, a station.
-	bool local = playing_local_file(state);
-	bool lyrics = lyrics_wanted && local;
-	bool studio = layout_choice == PLAYER_LAYOUT_STUDIO;
-	bool wave = layout_choice == PLAYER_LAYOUT_ALTERNATIVE && local;
-	bool alt = wave;
-
-	if (studio == layout_studio_now && alt == layout_alt_now && wave == layout_wave_now && lyrics == lyrics_allowed &&
-		alt_title_pill) {
-		return;
-	}
-	layout_studio_now = studio;
-	layout_alt_now = alt;
-	layout_wave_now = wave;
-	lyrics_allowed = lyrics;
-	// Up only with words for this very file; while they are still being read,
-	// as they were, so a track change does not take the page down and up again.
-	bool same_file = strcmp(state->current_file, lyrics_path) == 0;
-	if (!lyrics) {
-		lyrics_now = false;
-	} else if (same_file && lyrics_loaded) {
-		lyrics_now = lyrics_cur.count > 0;
-	}
-	apply_layout();
-	lyrics_request(state);
-
-	// The blurred copy is made at the shape of whatever shows it, so moving in
-	// or out of Studio means the one on hand is the wrong shape and the picture
-	// is asked for again. Only on a change of arrangement, which is a setting
-	// the user has just touched.
-	if (studio != backdrop_is_studio && cover_shown_path[0]) {
-		reload_cover(cover_shown_path);
-	}
-}
-
 // ---------------------------------------------------------------------------
-// the shape of the track
+// Now Playing Refresh & Playback Poll Loop
 // ---------------------------------------------------------------------------
 
-// Paints the bars into the canvas buffer by hand.
-//
-// RGB565A8, and written directly rather than through the drawing pipeline: the
-// gaps between the bars have to let the blurred sleeve through, an RGB565
-// canvas would lay an opaque rectangle over it, and one LVGL object per bar is
-// one more thing to lay out on every track change.
-//
-// The buffer is the colour plane followed by the alpha plane, which is what
-// LVGL means by RGB565A8.
-//
-// Each bar is a capsule rather than a rectangle: `cap` is how far the drawn
-// column is pulled in at that horizontal offset, from the circle of diameter
-// `solid` that rounds the ends. A silent stretch is then a row of dots rather
-// than a row of ticks, which is the shape this player's buttons and pills are
-// already drawn in.
-// The bars all start at the same place and are all the same width, and two
-// callers besides the painter need to know where: one to work out how far along
-// the playhead is in pixels, the other to compare that with what is on screen.
-static void wave_geometry(int *bar_w, int *left) {
-	int w = wave_w;
-	int b = w / WAVEFORM_BARS;
-	if (b < 1) {
-		b = 1;
+static void sync_fs_metadata(const char *title, const char *artist) {
+	if (fs_title_label) {
+		set_label_text_if_changed(fs_title_label, title ? title : "");
 	}
-	*bar_w = b;
-	*left = (w - b * WAVEFORM_BARS) / 2;
-}
-
-// How far along the strip the playhead is, in pixels of the canvas.
-//
-// Pixels and not columns: a column is a forty-eighth of the track, so a column
-// boundary stands still for several seconds and then jumps. In pixels the
-// playhead moves by one every half second or so, and the bar it is inside is
-// lit up to the playhead rather than all at once.
-//
-// Along the same stretch as the bar laid over it (see view_start), so a finger
-// on the strip lands where the lit part says it will.
-static int wave_played_px(double position) {
-	int bar_w, left;
-	wave_geometry(&bar_w, &left);
-	double fraction = view_length > 0.1 ? view_value(position) / 1000.0 : 0.0;
-	return left + (int)(fraction * bar_w * WAVEFORM_BARS);
-}
-
-static void wave_paint(int played_px) {
-	if (!wave_buf || !wave_canvas) {
-		return;
-	}
-
-	// The buffer's own width, and never the object's: an object that has not
-	// been laid out yet answers with something else, and painting to that
-	// number writes past the end of the buffer.
-	int w = wave_w;
-	int h = WAVE_HEIGHT;
-	if (w <= 0) {
-		return;
-	}
-
-	uint16_t *colour = (uint16_t *)wave_buf;
-	uint8_t *alpha = wave_buf + (size_t)w * h * 2;
-	memset(alpha, 0, (size_t)w * h);
-
-	lv_color_t tint = alt_mark();
-	uint16_t packed = (uint16_t)(((tint.red & 0xF8) << 8) | ((tint.green & 0xFC) << 3) | (tint.blue >> 3));
-
-	int bar_w, left;
-	wave_geometry(&bar_w, &left);
-	int solid = bar_w - WAVE_BAR_GAP;
-	if (solid < 1) {
-		solid = 1;
-	}
-	int middle = h / 2;
-
-	// The tallest a bar may be drawn, with the cap and a pixel of air left over
-	// so that a loud passage does not end flat against the top edge -- which is
-	// exactly what reads as clipped audio.
-	int reach = h / 2 - 1 - solid / 2;
-	if (reach < WAVE_MIN_BAR) {
-		reach = WAVE_MIN_BAR;
-	}
-
-	for (int i = 0; i < WAVEFORM_BARS; i++) {
-		int value = i < wave_ready ? wave_bars[i] : 0;
-		int half = value * reach / 255;
-		if (half < WAVE_MIN_BAR) {
-			half = WAVE_MIN_BAR;
-		}
-		int x0 = left + i * bar_w;
-		for (int dx = 0; dx < solid; dx++) {
-			int x = x0 + dx;
-			if (x < 0 || x >= w) {
-				continue;
-			}
-			// Decided per column of pixels rather than per bar, which is what
-			// lets the playhead stand in the middle of a bar.
-			uint8_t opa = x < played_px ? WAVE_PAST_OPA : WAVE_TODO_OPA;
-			// Doubled coordinates, so that an even-width bar can have its
-			// centre between two pixels without any rounding.
-			int d2 = 2 * dx - (solid - 1);
-			int cap = (solid - (int)utils_isqrt32((uint32_t)(solid * solid - d2 * d2))) / 2;
-
-			for (int y = middle - half + cap; y <= middle + half - cap; y++) {
-				if (y < 0 || y >= h) {
-					continue;
-				}
-				size_t at = (size_t)y * w + x;
-				colour[at] = packed;
-				alpha[at] = opa;
-			}
-		}
-	}
-
-	lv_obj_invalidate(wave_canvas);
-}
-
-// Moves the played part of the shape to `seconds`, if that has moved it at all.
-//
-// The guard is what keeps this cheap enough to call at fifteen frames a second:
-// repainting is eighty kilobytes of buffer and an invalidate, and on a track of
-// any length the answer changes about twice a second.
-static void wave_preview(double seconds) {
-	if (!layout_wave_now || !wave_canvas || view_length <= 0.1) {
-		return;
-	}
-	int px = wave_played_px(seconds);
-	if (px == wave_drawn) {
-		return;
-	}
-	wave_drawn = px;
-	wave_paint(px);
-}
-
-// Asks for this track's shape and repaints when either the shape or the
-// playhead has moved. Called from the progress poll, so it runs twice a second
-// while something is playing and once every two seconds otherwise.
-static void wave_refresh(const char *path, double position) {
-	if (!layout_wave_now || !wave_canvas) {
-		return;
-	}
-
-	// Compared with what is on screen as well as counted: while the shape is
-	// being worked out the columns already shown are scaled again whenever a
-	// louder one arrives.
-	int had = wave_ready;
-	uint8_t before[WAVEFORM_BARS];
-	memcpy(before, wave_bars, sizeof(before));
-	if (path && path[0]) {
-		wave_ready = waveform_get(path, wave_bars);
-	} else {
-		wave_ready = 0;
-	}
-	bool same_shape = wave_ready == had && memcmp(before, wave_bars, (size_t)wave_ready) == 0;
-
-	int px = wave_played_px(position);
-	uint32_t tone = album_tone;
-	if (px == wave_drawn && same_shape && tone == wave_drawn_tone) {
-		return;
-	}
-	wave_drawn = px;
-	wave_drawn_tone = tone;
-	wave_paint(px);
-}
-
-// The size the sleeve is asked for in the arrangement in force (see
-// reload_cover()).
-static void cover_request_size(int *w, int *h) {
-	*w = layout_studio_now ? studio_cover_geometry(NULL) : cover_box_w;
-	*h = layout_studio_now ? *w : cover_box_h;
-}
-
-// The next track's cover, made and kept in the cache while this one plays, so
-// that skipping to it, or reaching it, finds it ready instead of decoding it
-// then. Only with the screen on: with it off nobody sees the cover arrive, and
-// the decode would be battery spent on a guess.
-static void prefetch_next_cover(void) {
-	if (!power_screen_is_on() || live_mode) {
-		return;
-	}
-	char next[512];
-	if (!playlist_peek_auto(next, sizeof(next)) || strcmp(next, cover_shown_path) == 0) {
-		return;
-	}
-	int w, h;
-	cover_request_size(&w, &h);
-	coverloader_prefetch_player(next, w, h);
-}
-
-// Throws away what is on screen and asks for the artwork of `filepath`. The
-// half of refresh_cover() that runs once it is known that the picture really is
-// changing.
-static void reload_cover(const char *filepath) {
-	if (cover_release_cb) {
-		cover_release_cb();
-	}
-
-	// Detach the old pixels before freeing them, so nothing can draw from a
-	// buffer that's already gone. The placeholder covers the gap while the
-	// worker decodes.
-	lv_image_set_src(cover_img, NULL);
-	lv_obj_set_style_bg_image_src(player_menu, NULL, 0);
-	// The blur of the picture going away goes with it, from behind the words
-	// too: until the new one is made they are on a plain dark page.
-	lyrics_bg_forget();
-	if (layout_studio_now && studio_bg) {
-		lv_image_set_src(studio_bg, NULL); // Studio's points at the backdrop freed below
-	}
-	cover_free(&current_cover);
-	cover_free(&current_backdrop);
-	bar_over_player_update();
-
-	cover_show(false);
-	// Studio holds pointers to both of those, so it is told in the same breath:
-	// its sleeve and its background come down and the empty square goes up for
-	// as long as the decode takes.
-	if (layout_studio_now) {
-		studio_refresh_cover();
-	}
-
-	// Backdrop gone: the chrome goes back to following the theme.
-	set_over_cover(false);
-	album_tone = 0;
-	paint_alt_tint();
-
-	lv_obj_invalidate(cover_panel);
-	lv_obj_invalidate(player_menu);
-
-	if (filepath && filepath[0]) {
-		backdrop_is_studio = layout_studio_now;
-		cover_set_backdrop_upright(backdrop_is_studio);
-
-		// The sleeve is asked for at the size the arrangement in force will
-		// draw it. A picture that does not match its widget is resampled by
-		// LVGL on every frame it is drawn, and every frame is what a sheet
-		// being dragged, or the control centre coming down over it, means: in
-		// Studio the picture is decoded at the width of the screen and shown
-		// at two thirds of it, and that resampling is the interface's core
-		// being spent again and again on an answer that never changes.
-		int cover_w, cover_h;
-		cover_request_size(&cover_w, &cover_h);
-		coverloader_request_player(filepath, cover_w, cover_h, backdrop_w,
-								   backdrop_is_studio ? backdrop_studio_h : backdrop_h);
-		cover_request_outstanding = true;
-
-		// The collector rides on the progress timer too; make sure it is
-		// ticking even when nothing is playing (paused player, theme change).
-		lv_timer_resume(progress_slider_timer);
-		cover_poll_start();
-	} else {
-		cover_request_outstanding = false;
+	if (fs_artist_label) {
+		set_label_text_if_changed(fs_artist_label, artist ? artist : "");
+		lv_obj_set_hidden(fs_artist_label, !(artist && artist[0]));
 	}
 }
 
-// A track change.
-//
-// The next track of a record carries the record's cover, and so does the next
-// file in a folder that keeps its picture beside the music. Decoding it again
-// is a second of this processor's time for a picture that does not change, and
-// the cover blinking out to the placeholder and back is the part the user sees.
-//
-// So nothing is thrown away yet: the loader is asked what the new track's
-// artwork is -- which it answers by reading the picture, not by decoding it --
-// and only an answer that differs from what is on screen costs anything. When
-// it does differ the old cover stays up for the one poll that takes, which
-// still reads better than a placeholder in the gap.
-static void refresh_cover(const char *filepath) {
-	if (!cover_img)
-		return;
-
-	snprintf(cover_shown_path, sizeof(cover_shown_path), "%s", filepath ? filepath : "");
-
-	if (cover_shown_id != 0 && current_cover.pixels && filepath && filepath[0]) {
-		cover_id_state = COVER_ID_NEW_TRACK;
-		coverloader_request_player_id(filepath);
-		lv_timer_resume(progress_slider_timer);
-		cover_poll_start();
-		return;
-	}
-
-	cover_id_state = COVER_ID_IDLE;
-	cover_incoming_id = 0;
-	reload_cover(filepath);
-}
-
-// The answer to whichever question was asked, picked up on the progress poll.
-static void apply_cover_id_result(void) {
-	if (cover_id_state == COVER_ID_IDLE) {
-		return;
-	}
-	uint64_t id = 0;
-	bool finished = false;
-	coverloader_take_player_id(&id, &finished);
-	if (!finished) {
-		return;
-	}
-
-	if (cover_id_state == COVER_ID_MEASURE) {
-		cover_id_state = COVER_ID_IDLE;
-		cover_shown_id = id;
-		return;
-	}
-
-	cover_id_state = COVER_ID_IDLE;
-
-	// The same picture: the cover, the backdrop, the sleeve colour and the
-	// chrome all stay exactly as they are. This is the whole point.
-	if (id != 0 && id == cover_shown_id) {
-		return;
-	}
-
-	// Different, and its id is already known: the decode does not have to be
-	// asked what it produced.
-	cover_incoming_id = id;
-	reload_cover(cover_shown_path);
-}
-
-// Picks up the worker's finished artwork, if any. Runs on the UI thread from
-// the progress timer, so touching widgets here is allowed.
-static void apply_cover_result(void) {
-	if (!cover_request_outstanding) {
-		return;
-	}
-
-	cover_image_t new_cover, new_backdrop;
-	bool finished = false;
-	bool has_cover = coverloader_take_player(&new_cover, &new_backdrop, &finished);
-
-	if (!finished) {
-		return; // still decoding; the placeholder stays up
-	}
-	cover_request_outstanding = false;
-
-	if (has_cover) {
-		// What is now on screen, so the next track can be asked whether its
-		// artwork is this same picture. Usually known already; when it is not
-		// -- the first cover after the player opens, a station's icon -- the
-		// loader is asked, because working the id out reads the file and this
-		// is the interface thread.
-		cover_shown_id = cover_incoming_id;
-		if (cover_shown_id == 0 && cover_shown_path[0]) {
-			cover_id_state = COVER_ID_MEASURE;
-			coverloader_request_player_id(cover_shown_path);
-			cover_poll_start();
-		}
-
-		current_cover = new_cover;
-		current_cover.dsc.data = current_cover.pixels; // struct moved, buffer didn't
-
-		lv_image_set_src(cover_img, &current_cover.dsc);
-		lv_obj_set_size(cover_img, current_cover.dsc.header.w, current_cover.dsc.header.h);
-		lv_obj_center(cover_img);
-
-		cover_show(true);
-
-		if (new_backdrop.pixels) {
-			current_backdrop = new_backdrop;
-			current_backdrop.dsc.data = current_backdrop.pixels;
-			lv_obj_set_style_bg_image_src(player_menu, &current_backdrop.dsc, 0);
-		}
-
-		// The dark backdrop is up: light chrome, in both themes.
-		set_over_cover(true);
-
-		// And the sleeve's own colour, which is what the alternative layout is
-		// drawn in: the one an album's page is painted in (cover_page_tone),
-		// so the record looks the same colour on both. Kept with the picture by
-		// the loader, so a cover seen before is not worked out again, and taken
-		// to full strength here for marks drawn over a dark backdrop.
-		uint32_t tone = 0;
-		int luma = 0;
-		bool light = false;
-		if (current_cover.has_tone) {
-			tone = current_cover.tone;
-		} else if (!cover_page_tone(&current_cover, COVER_PAGE_LIGHT_FROM, &tone, &luma, &light)) {
-			tone = 0;
-		}
-		album_tone = tone ? cover_tone_stretched(tone) : 0;
-		paint_alt_tint();
-
-		// The words' background, ready before they are pulled in.
-		lyrics_bg_prepare();
-
-		lv_obj_invalidate(cover_panel);
-		lv_obj_invalidate(player_menu);
-	}
-	if (!has_cover) {
-		cover_shown_id = 0; // nothing to compare the next track against
-		lyrics_bg_forget(); // no picture, nothing to blur
-	}
-	bar_over_player_update();
-	if (lyrics_progress > 0) {
-		lyrics_look(true); // Studio's backdrop has arrived, or there is none
-	}
-	cover_incoming_id = 0;
-
-	// Studio draws both of these itself -- the sleeve smaller and the blurred
-	// copy across the whole screen -- so it is told here, where they land,
-	// rather than asked on a timer.
-	if (layout_studio_now) {
-		studio_refresh_cover();
-	}
-	// No artwork: the placeholder is already showing.
-
-	prefetch_next_cover();
-}
-
-// Collects whatever the loader has answered, quickly, for as long as anything
-// is outstanding; then the timer stops until the next question.
-static void cover_poll_cb(lv_timer_t *timer) {
-	apply_cover_id_result();
-	apply_cover_result();
-	if (!cover_request_outstanding && cover_id_state == COVER_ID_IDLE) {
-		lv_timer_pause(timer);
-	}
-}
-
-static void cover_poll_start(void) {
-	if (!cover_poll_timer) {
-		cover_poll_timer = lv_timer_create(cover_poll_cb, COVER_POLL_MS, NULL);
-	}
-	lv_timer_resume(cover_poll_timer);
-}
-
-// The artwork the player has already decoded for the loaded track, lent to
-// anything else that wants to draw it (the screensaver). NULL while a track
-// has no cover or its decode is still in flight -- never a stale pointer:
-// refresh_cover() zeroes both before the buffers are freed.
-const lv_image_dsc_t *player_cover_image(void) { return current_cover.pixels ? &current_cover.dsc : NULL; }
-
-const lv_image_dsc_t *player_backdrop_image(void) {
-	return current_backdrop.pixels ? &current_backdrop.dsc : NULL;
-}
-
-static void update_repeat_button(void);
-
-// Repaints the bits that are coloured by hand, and rebuilds the blurred
-// artwork behind the controls -- it is dimmed towards the page background, so
-// it has to be regenerated when that background changes.
-static void player_refresh_theme(void) {
-	if (!cover_panel)
-		return;
-
-	if (studio_box) {
-		lv_obj_set_style_bg_color(studio_box, theme()->screen_bg, 0);
-	}
-
-	lv_obj_set_style_bg_color(cover_panel, theme()->cover_bg, 0);
-	lv_obj_set_style_image_recolor(cover_placeholder_icon, theme()->text_secondary, 0);
-	// The backdrop over a loaded cover is always the dark treatment -- same
-	// look in both themes; only the no-cover panel follows the theme.
-	cover_set_backdrop_light(false);
-	lv_obj_set_style_bg_color(progress_slider, chrome_accent(), LV_PART_INDICATOR);
-	lv_obj_set_style_bg_color(progress_slider, chrome_accent(), LV_PART_KNOB);
-	set_over_cover(chrome_over_cover); // repaints the play disc for the new palette
-	update_repeat_button();
-	update_speed_button();
-
-	device_state_t state;
-	device_state_get(&state);
-	refresh_cover(state.current_file);
-	if (lyrics_pane) {
-		lyrics_look(lyrics_look_on); // the words in the new theme's colours
-	}
-}
-
-static void update_qobuz_badge(void);
-
-// Refreshes the now-playing info (title + artist) from the current
-// device state and resets the per-track length cache. Used both when the user
-// picks a file and when playback auto-advances to a new track.
 static void refresh_now_playing(void) {
-	current_total_length = 0; // unknown until the playback thread reports it
+	current_total_length = 0;
 
-	// The library lists carry an accent mark on the playing track (and on the
-	// album and artist it belongs to). This is the one place every track
-	// change goes through, so it is where they are told.
 	medialist_notify_now_playing();
 	browser_notify_now_playing();
 	trackmenu_notify_now_playing();
 
-	// Wind the progress display back to the start straight away, so the bar
-	// never sits at the previous track's position while the new one loads.
-	lv_slider_set_value(progress_slider, 0, LV_ANIM_OFF);
+	slider_dragging = false;
 	set_progress_label(0, 0);
 
 	device_state_t state;
@@ -3548,563 +3237,64 @@ static void refresh_now_playing(void) {
 
 	apply_live_mode(state.live);
 	apply_connecting();
-	// Before anything is drawn: which arrangement this source gets decides
-	// where the title goes and what colour everything is.
-	update_layout(&state);
-	// Decided from the path every time, as for books: a flag raised at start
-	// would have to be cleared on every route by which the track can change,
-	// and the first one forgotten leaves the player dressed as a podcast over
-	// a song.
 	apply_audiobook_mode(!state.live && audiobook_is_playing(),
 						 !state.live && podcastcache_is_episode(state.current_file));
 
 	if (state.live) {
-		// The station on top, what it says is on air underneath -- the same
-		// two lines as a track, carrying the two things a radio knows.
 		scrolltext_set(song_title_label, state.metadata.title);
 		scrolltext_set(song_artist_label, state.metadata.artist);
-		lyrics_head_sync();
-		alt_pills_sync();
-
+		sync_fs_metadata(state.metadata.title, state.metadata.artist);
 		update_fav_button();
 		update_format_label(&state);
-
-		// The artwork is the station's own icon, downloaded when it started.
-		// An empty path simply leaves the radio placeholder up.
+		update_service_badges();
 		refresh_cover(state.live_cover);
+		upnext_refresh();
+		update_queue_and_shortcuts();
+		notify_state_cbs();
 		return;
 	}
 
 	const char *file = state.current_file;
 	const char *slash = strrchr(file, '/');
-	scrolltext_set(song_title_label, state.metadata.title[0] ? state.metadata.title : (slash ? slash + 1 : file));
-
-	// Whose name goes under the title: see metadata_shown_artist().
+	const char *shown_title = state.metadata.title[0] ? state.metadata.title
+							  : file[0]               ? (slash ? slash + 1 : file)
+													  : tr("player_no_track_loaded");
 	const char *artist = metadata_shown_artist(&state.metadata);
-	scrolltext_set(song_artist_label, artist);
-	lyrics_head_sync();
-	alt_pills_sync();
+
+	scrolltext_set(song_title_label, shown_title);
+	scrolltext_set(song_artist_label, artist ? artist : "");
+	sync_fs_metadata(shown_title, artist ? artist : "");
 
 	update_fav_button();
 	update_format_label(&state);
-	update_qobuz_badge();
+	update_service_badges();
 
 	lyrics_request(&state);
-
+	wave_refresh(file, state.progress_current_secs);
 	refresh_cover(file);
+	upnext_refresh();
+	carousel_sync_adjacent_requests();
+	update_queue_and_shortcuts();
+	notify_state_cbs();
 }
 
-// The parts of the now-playing display a live stream changes while it runs:
-// the station name (the stream's own name arrives with the connection), what
-// is on air (an ICY title, every few minutes), the bitrate, and the artwork
-// once the icon has been downloaded. Deliberately not a full
-// refresh_now_playing(): that throws the decoded cover away and asks for it
-// again, which for a station whose icon has not changed is work for nothing.
 static void refresh_live_texts(const device_state_t *state) {
 	scrolltext_set(song_title_label, state->metadata.title);
 	scrolltext_set(song_artist_label, state->metadata.artist);
-	lyrics_head_sync();
-	alt_pills_sync();
+	sync_fs_metadata(state->metadata.title, state->metadata.artist);
 	update_fav_button();
 	update_format_label(state);
-
 	if (strcmp(cover_shown_path, state->live_cover) != 0) {
 		refresh_cover(state->live_cover);
 	}
+	notify_state_cbs();
 }
 
-// The mirror of the Qobuz favourites has arrived, so the star may need to
-// change face. It comes from the qobuzsync worker, hence the bounce onto the
-// UI thread.
-static void update_fav_button(void);
-
-static void fav_refresh_async(void *user) {
-	(void)user;
-	update_fav_button();
-}
-
-static void qobuz_favorites_changed(void) { gui_post(fav_refresh_async, NULL); }
-static void tidal_favorites_changed(void) { gui_post(fav_refresh_async, NULL); }
-
-// The Qobuz id of the loaded track, 0 when what is playing does not come from
-// Qobuz. This is the question that splits the star and "add to playlist" in
-// two: a user's own file is written to the local database, a Qobuz track to
-// the account.
-static long current_qobuz_track(void) {
-	device_state_t state;
-	device_state_get(&state);
-	return state.current_file[0] ? qobuzcache_track_id(state.current_file) : 0;
-}
-
-// The podcast the playing episode belongs to, plus what following it needs:
-// title, author and cover. All from the sidecar written when the episode was
-// downloaded -- no network, which listening to an already cached episode may
-// well not have.
-static bool podcast_current_feed(long long *id_out, podcast_feed_t *feed_out) {
-	device_state_t state;
-	device_state_get(&state);
-	if (state.live || !state.current_file[0]) {
-		return false;
-	}
-	long long id = 0;
-	if (!podcastcache_feed_id(state.current_file, &id) || id <= 0) {
-		return false;
-	}
-	if (id_out) {
-		*id_out = id;
-	}
-	if (feed_out) {
-		memset(feed_out, 0, sizeof(*feed_out));
-		feed_out->id = id;
-		// The podcast name is also the episode's album tag: see
-		// podcastcache_write_sidecars(), which writes it to both places on
-		// purpose.
-		snprintf(feed_out->title, sizeof(feed_out->title), "%.*s", (int)sizeof(feed_out->title) - 1,
-				 state.metadata.album);
-		podcastcache_tag(state.current_file, "feed_author", feed_out->author, sizeof(feed_out->author));
-		podcastcache_tag(state.current_file, "feed_image", feed_out->image, sizeof(feed_out->image));
-	}
-	return true;
-}
-
-static bool current_podcast_episode(void) {
-	device_state_t state;
-	device_state_get(&state);
-	return state.current_file[0] && podcastcache_is_episode(state.current_file);
-}
-
-// The playing episode's podcast, for callers outside the player (the control
-// centre): the same lookup the player uses for its own star, exposed so both
-// stars say the same thing.
-bool player_current_podcast_feed(long long *id_out, podcast_feed_t *feed_out) {
-	return podcast_current_feed(id_out, feed_out);
-}
-
-// The same for Tidal. Two separate questions rather than one returning "which
-// service": the two caches live in different directories, so a path can answer
-// yes to at most one, which makes it impossible by construction for the player
-// to believe a track comes from both.
-static long current_tidal_track(void) {
-	device_state_t state;
-	device_state_get(&state);
-	return state.current_file[0] ? tidalcache_track_id(state.current_file) : 0;
-}
-
-// The Qobuz mark, top right, when what is playing comes from there. Same place
-// and same purpose as the live badge for radio: say where the music comes from
-// without taking space from anything else.
-//
-// The question is the star's own -- is the file in the Qobuz cache? -- so
-// there is no extra state to keep in step.
-static void update_qobuz_badge(void) {
-	// The marks share one corner and can never appear together: a track comes
-	// from one service only. So which one shows is decided here, rather than
-	// leaving each badge to hide itself -- which is how they would eventually
-	// have overlapped.
-	bool from_qobuz = !live_mode && current_qobuz_track() != 0;
-	bool from_tidal = !live_mode && !from_qobuz && current_tidal_track() != 0;
-	bool from_podcast = !live_mode && !from_qobuz && !from_tidal && current_podcast_episode();
-
-	if (qobuz_badge) {
-		if (from_qobuz) {
-			lv_obj_set_hidden(qobuz_badge, false);
-			lv_obj_move_foreground(qobuz_badge);
-		} else {
-			lv_obj_set_hidden(qobuz_badge, true);
-		}
-	}
-	if (tidal_badge) {
-		if (from_tidal) {
-			lv_obj_set_hidden(tidal_badge, false);
-			lv_obj_move_foreground(tidal_badge);
-		} else {
-			lv_obj_set_hidden(tidal_badge, true);
-		}
-	}
-	if (podcast_badge) {
-		if (from_podcast) {
-			lv_obj_set_hidden(podcast_badge, false);
-			lv_obj_move_foreground(podcast_badge);
-		} else {
-			lv_obj_set_hidden(podcast_badge, true);
-		}
-	}
-}
-
-// Repaints the star from the database: filled yellow when the loaded track
-// is a favourite, quiet outline otherwise.
-static void update_fav_button(void) {
-	if (!fav_btn_icon) {
-		return;
-	}
-
-	// A station is starred in the radio favourites, not the music library:
-	// there is no file to put in the database, and the list the star feeds is
-	// the one on the Radio page.
-	radio_station_t station;
-	bool starred = false;
-	long qobuz_id = 0;
-	long tidal_id = 0;
-	long long feed_id = 0;
-	if (radio_current_station(&station)) {
-		starred = radio_fav_contains(station.uuid);
-	} else if (podcast_current_feed(&feed_id, NULL)) {
-		// On a podcast the star does not mark a liked track: it follows the
-		// podcast, so it turns up in the followed list without searching. The
-		// list is on the card, so the answer is immediate and nothing has to
-		// be asked of the network.
-		starred = podcastsubs_is_followed(feed_id);
-	} else if ((qobuz_id = current_qobuz_track()) > 0) {
-		// A Qobuz track: the star reports what is on the account, not what is
-		// in the local database. Until the mirror arrives it is drawn empty
-		// and asked for -- one request per session, not one per song.
-		starred = qobuzsync_is_favorite(qobuz_id);
-		qobuzsync_favorites_refresh(qobuz_favorites_changed);
-	} else if ((tidal_id = current_tidal_track()) > 0) {
-		starred = tidalsync_is_favorite(tidal_id);
-		tidalsync_favorites_refresh(tidal_favorites_changed);
-	} else {
-		// device_state, not audio_get_current_file(): the star is drawn from
-		// one source and toggled from another, and when the two disagreed the
-		// star never filled in -- the tap wrote the right track to the
-		// database while the drawing looked up a different one.
-		device_state_t state;
-		device_state_get(&state);
-		starred = state.current_file[0] && library_fav_contains(state.current_file);
-	}
-
-	// The star's colour is decided here and nowhere else. This function runs
-	// last on every track change, so anything that tints the star elsewhere is
-	// overwritten.
-	//
-	// An empty star is drawn in the disc's own ink so that it reads on it; a
-	// filled one keeps the yellow, which is the same on every page of the
-	// player and is what says "favourite" rather than "here is the album's
-	// colour again".
-	if (starred) {
-		lv_image_set_src(fav_btn_icon, &icon_star_filled);
-		lv_obj_set_style_image_recolor(fav_btn_icon, lv_color_make(246, 211, 45), 0); // Adwaita yellow
-	} else {
-		lv_image_set_src(fav_btn_icon, &icon_star);
-		lv_obj_set_style_image_recolor(fav_btn_icon, layout_alt_now ? alt_ink() : lv_color_make(150, 150, 150), 0);
-	}
-	lv_obj_set_style_image_recolor_opa(fav_btn_icon, LV_OPA_COVER, 0);
-}
-
-// The outcome of a Qobuz star, from the qobuzsync worker. Success says
-// nothing -- the filled star already did; failure has to be said, because the
-// star had filled in optimistically and is about to empty again.
-static char fav_error[192];
-
-static void fav_error_async(void *user) {
-	(void)user;
-	if (fav_error[0]) {
-		gui_notify_popup(fav_error);
-	}
-	update_fav_button();
-}
-
-static void qobuz_fav_done(bool ok, const char *error, void *user) {
-	(void)user;
-	snprintf(fav_error, sizeof(fav_error), "%s", ok ? "" : (error && error[0] ? error : tr("qobuz_favourites_failed")));
-	gui_post(fav_error_async, NULL);
-}
-
-static void tidal_fav_done(bool ok, const char *error, void *user) {
-	(void)user;
-	snprintf(fav_error, sizeof(fav_error), "%s", ok ? "" : (error && error[0] ? error : tr("tidal_favourites_failed")));
-	gui_post(fav_error_async, NULL);
-}
-
-static void fav_btn_event_cb(lv_event_t *e) {
-	(void)e;
-
-	radio_station_t station;
-	if (radio_current_station(&station)) {
-		if (radio_fav_contains(station.uuid)) {
-			radio_fav_remove(station.uuid);
-		} else {
-			radio_fav_add(&station);
-		}
-		update_fav_button();
-		return;
-	}
-
-	// A podcast: the star follows or unfollows it. Written to the card at
-	// once, so switching the player off a moment later does not lose it.
-	long long feed_id = 0;
-	podcast_feed_t feed;
-	if (podcast_current_feed(&feed_id, &feed)) {
-		if (podcastsubs_is_followed(feed_id)) {
-			podcastsubs_unfollow(feed_id);
-		} else {
-			podcastsubs_follow(&feed);
-		}
-		update_fav_button();
-		return;
-	}
-
-	device_state_t state;
-	device_state_get(&state);
-	if (!state.current_file[0]) {
-		return;
-	}
-
-	// A Qobuz track goes into the account's favourites. Saving it in the local
-	// database would mean keeping the path of a cache file that will be gone
-	// twenty tracks from now, and invisible from any other device.
-	long qobuz_id = qobuzcache_track_id(state.current_file);
-	if (qobuz_id > 0) {
-		bool want = !qobuzsync_is_favorite(qobuz_id);
-		qobuzsync_favorite_toggle(qobuz_id, want, qobuz_fav_done, NULL);
-		update_fav_button(); // the mirror has already flipped: shows at once
-		return;
-	}
-
-	long tidal_id = tidalcache_track_id(state.current_file);
-	if (tidal_id > 0) {
-		bool want = !tidalsync_is_favorite(tidal_id);
-		tidalsync_favorite_toggle(tidal_id, want, tidal_fav_done, NULL);
-		update_fav_button();
-		return;
-	}
-
-	const char *title = state.metadata.title[0] ? state.metadata.title : strrchr(state.current_file, '/') + 1;
-	// No notification popup: the star filling in is the whole feedback.
-	library_fav_toggle(state.current_file, title, state.metadata.artist);
-	update_fav_button();
-}
-
-// The format line, the way the stock player writes it: "16/44.1 FLAC".
-static void update_format_label(const device_state_t *state) {
-	// The mark beside it in Studio, which is the same question asked of the
-	// stream rather than of the library. Here because this is where the format
-	// line is worked out, and the two say one thing between them.
-	if (layout_studio_now && studio_quality_icon) {
-		const lv_image_dsc_t *mark = studio_quality_mark(state);
-		if (mark) {
-			lv_image_set_src(studio_quality_icon, mark);
-			lv_obj_set_hidden(studio_quality_icon, false);
-		} else {
-			lv_obj_set_hidden(studio_quality_icon, true);
-		}
-	}
-
-	if (!format_label) {
-		return;
-	}
-
-	if (state->live) {
-		// A lossy station is quoted by its bitrate, a lossless one by depth and
-		// rate like a track from the card ("16/44.1 FLAC"). The codec is the
-		// decoder's, not the directory's claim. Nothing at all until the first
-		// frame has been decoded.
-		radio_now_t now;
-		radio_get_now(&now);
-		if (now.bits > 0 && now.sample_rate > 0 && now.codec[0]) {
-			lv_label_set_text_fmt(format_label, "%d/%g %s", now.bits, now.sample_rate / 1000.0, now.codec);
-		} else if (now.bitrate > 0) {
-			lv_label_set_text_fmt(format_label, "%d kbps %s", now.bitrate, now.codec[0] ? now.codec : "MP3");
-		} else if (now.codec[0]) {
-			lv_label_set_text(format_label, now.codec);
-		} else {
-			lv_label_set_text(format_label, "");
-		}
-		return;
-	}
-
-	if (state->stream_sample_rate <= 0 || !state->current_file[0]) {
-		lv_label_set_text(format_label, "");
-		return;
-	}
-
-	// Nothing on a podcast. "16/44.1 MP3" is true and useless: an episode is
-	// not chosen for its audio quality, there is no better version to buy, and
-	// the number takes the line under the title without saying anything worth
-	// knowing.
-	if (podcastcache_is_episode(state->current_file)) {
-		lv_label_set_text(format_label, "");
-		return;
-	}
-
-	const char *dot = strrchr(state->current_file, '.');
-	char kind[8] = "";
-	if (dot) {
-		size_t k = 0;
-		for (const char *c = dot + 1; *c && k < sizeof(kind) - 1; c++) {
-			kind[k++] = (char)((*c >= 'a' && *c <= 'z') ? *c - 32 : *c);
-		}
-		kind[k] = '\0';
-	}
-
-	// A DSD track says what it is rather than what carries it: "24/176.4 DSF"
-	// is true of a DSD64 file and of a DSD256 one, and tells the listener
-	// nothing. How it gets there is not said: DoP is the only way it does.
-	int dsd = audio_get_dsd_multiple();
-	if (dsd > 0) {
-		lv_label_set_text_fmt(format_label, "DSD%d", dsd);
-		return;
-	}
-
-	// The codec name comes from the decoder, not the extension: an .m4a holds
-	// either AAC or ALAC, and those read as two different things under a
-	// cover. When the decoder has no name to give -- the libsndfile formats --
-	// the extension still serves.
-	char codec[16] = "";
-	audio_get_stream_codec(codec, sizeof(codec));
-	const char *name = codec[0] ? codec : kind;
-
-	// A lossy format has no bit depth of its own: "16/44.1 MP3" describes the
-	// PCM leaving the decoder, not the file, and is equally true of a 96 kbps
-	// MP3 and a 320 kbps one. What an MP3, an AAC or an Opus is -- exactly as
-	// for a radio station -- is its bitrate.
-	if (audio_stream_is_lossy()) {
-		// The nominal figure first, the one written in the file. It is the
-		// only one showable on a Qobuz or Tidal track: the cache file is still
-		// growing while it plays, so the bytes-over-seconds average climbed on
-		// screen until the download finished and it settled.
-		int kbps = audio_get_stream_bitrate_kbps();
-
-		// When the file does not declare one (a variable-bitrate MP3, a silent
-		// AAC) the real average stands in -- but only once the download has
-		// finished, for the reason just given.
-		struct stat st;
-		if (kbps <= 0 && !qobuzcache_owns(state->current_file) && !tidalcache_owns(state->current_file) &&
-			state->progress_total_secs > 0.5 && stat(state->current_file, &st) == 0 && st.st_size > 0) {
-			kbps = (int)((double)st.st_size * 8.0 / state->progress_total_secs / 1000.0 + 0.5);
-		}
-
-		if (kbps > 0) {
-			lv_label_set_text_fmt(format_label, "%d kbps %s", kbps, name);
-			return;
-		}
-		// Neither one: the format name alone beats quoting a bit depth the
-		// file does not have.
-		lv_label_set_text(format_label, name);
-		return;
-	}
-
-	int bits = audio_get_stream_bits();
-	lv_label_set_text_fmt(format_label, "%d/%g %s", bits > 0 ? bits : 16, state->stream_sample_rate / 1000.0, name);
-}
-
-// The speed setting of what is playing: an episode has its own, apart from the
-// books'.
-static bool speed_is_podcast(void) { return podcast_mode && !audiobook_mode; }
-
-static int speed_current_permille(void) {
-	return speed_is_podcast() ? podcast_speed_permille() : audiobook_speed_permille();
-}
-
-// The gauge wears the accent colour whenever the book or episode is not at
-// normal speed, the way the repeat glyph it stands in for marks a mode that is
-// on.
-static void update_speed_button(void) {
-	if (!speed_btn_icon) {
-		return;
-	}
-	bool normal = speed_current_permille() == AUDIOBOOK_SPEED_NORMAL;
-	lv_obj_set_style_image_recolor(speed_btn_icon, normal ? lv_color_make(100, 100, 100) : chrome_accent(), 0);
-	lv_obj_set_style_image_recolor_opa(speed_btn_icon, LV_OPA_COVER, 0);
-}
-
-static void speed_pick(void *user) {
-	int permille = (int)(intptr_t)user;
-	if (speed_is_podcast()) {
-		podcast_set_speed_permille(permille);
-		permille = podcast_speed_permille();
-	} else {
-		audiobook_set_speed_permille(permille);
-		permille = audiobook_speed_permille();
-	}
-	// Straight through to the playback thread: it picks the factor up on the
-	// next block, so the change is heard within a period rather than at the
-	// next track.
-	audio_set_speed((double)permille / 1000.0);
-	update_speed_button();
-}
-
-static void speed_btn_event_cb(lv_event_t *e) {
-	static const int CHOICES[] = {500, 750, 1000, 1250, 1500, 1750, 2000};
-	static const char *const LABELS[] = {"0.5x", "0.75x", "1.0x", "1.25x", "1.5x", "1.75x", "2.0x"};
-	enum { CHOICE_COUNT = sizeof(CHOICES) / sizeof(CHOICES[0]) };
-
-	// Zeroed, not just filled field by field: popover_item_t also has
-	// `checked`, and stack garbage in it puts a tick on a random entry -- along
-	// with the different row layout a tick brings.
-	//
-	// The tick belongs here for the same reason it does in the Qobuz quality
-	// menu: this is a choice between alternatives, not a list of actions, so
-	// the current one has to be visible.
-	popover_item_t items[CHOICE_COUNT] = {0};
-	int current = speed_current_permille();
-	for (int i = 0; i < CHOICE_COUNT; i++) {
-		items[i].label = LABELS[i];
-		items[i].action = speed_pick;
-		items[i].user = (void *)(intptr_t)CHOICES[i];
-		items[i].checked = CHOICES[i] == current;
-	}
-	popover_show(lv_event_get_current_target(e), items, CHOICE_COUNT);
-}
-
-// Updates the repeat-mode button's icon and colour to reflect the active mode.
-// The icons are the white ARGB bitmaps generated from assets/icons/*.svg;
-// recolouring them is what marks the mode as active or not.
-static void update_repeat_button(void) {
-	// The active mode wears the accent colour of the moment, read each time
-	// rather than frozen, so it follows a change of accent.
-	lv_color_t active = chrome_accent();
-	lv_color_t inactive = lv_color_make(100, 100, 100);
-
-	const lv_image_dsc_t *icon;
-	lv_color_t color;
-
-	switch (playlist_get_mode()) {
-	case PLAYBACK_MODE_REPEAT_ONE:
-		icon = &icon_repeat_one;
-		color = active;
-		break;
-	case PLAYBACK_MODE_REPEAT_ALL:
-		icon = &icon_repeat_all;
-		color = active;
-		break;
-	case PLAYBACK_MODE_SHUFFLE:
-		icon = &icon_shuffle;
-		color = active;
-		break;
-	case PLAYBACK_MODE_SHUFFLE_REPEAT:
-		icon = &icon_shuffle_repeat;
-		color = active;
-		break;
-	case PLAYBACK_MODE_NORMAL:
-	default:
-		icon = &icon_repeat_off;
-		color = inactive;
-		break;
-	}
-
-	lv_image_set_src(repeat_btn_icon, icon);
-	lv_obj_set_style_image_recolor(repeat_btn_icon, color, 0);
-	lv_obj_set_style_image_recolor_opa(repeat_btn_icon, LV_OPA_COVER, 0);
-}
-
-// Called when the current track finished on its own: advances the folder queue
-// per the active playback mode. If a next track starts, refresh the UI to it;
-// otherwise playback simply stays stopped (end of folder in normal mode).
 static void handle_track_finished(void) {
-	// What is playing came from DLNA: the queue belongs to the phone, not to
-	// the player. Tell it the track finished and wait for the next URL,
-	// instead of drawing from a local queue one entry long.
 	if (dlna_owns_playback()) {
 		dlna_notify_finished();
 		return;
 	}
-
-	// "Stop at the end of the episode": the queue is left exactly where it is,
-	// which is what the player already does when a queue simply runs out. Asked
-	// here and not at a boundary inside the file, because for a podcast the end
-	// of the episode IS the end of the track -- there is no chapter to watch
-	// for, which is what makes this the cheaper half of the audiobook's version.
 	char path[512];
 	audio_get_current_file(path, sizeof(path));
 	if (podcast_stop_at_episode_end() && podcastcache_is_episode(path)) {
@@ -4112,17 +3302,14 @@ static void handle_track_finished(void) {
 		refresh_now_playing();
 		return;
 	}
-
 	if (device_state_advance_auto(NULL, 0)) {
 		refresh_now_playing();
+		carousel_animate_from(carousel_stride() / 3);
 	} else {
-		// The queue ran out: the track it ended on went into the history.
 		trackmenu_notify_now_playing();
 	}
 }
 
-// A track ended on its own: the next one is started now rather than at the
-// next poll, while the PCM held for gapless still has its queue to play.
 static void track_end_async(void *user) {
 	(void)user;
 	if (device_state_take_completion()) {
@@ -4130,14 +3317,12 @@ static void track_end_async(void *user) {
 	}
 }
 
-// Playback thread.
-static void track_end_hook(void) { gui_post(track_end_async, NULL); }
+static void track_end_hook(void) {
+	gui_post(track_end_async, NULL);
+}
 
-// Reads the current device state and reconciles the UI against it. This is the
-// single point that keeps the play/pause button and the progress bar from
-// going stale once a track finishes on its own.
 static void update_progress(void) {
-	// Auto-advance or loop the folder when the track has played through.
+	upnext_poll();
 	if (device_state_take_completion()) {
 		handle_track_finished();
 	}
@@ -4145,20 +3330,13 @@ static void update_progress(void) {
 	device_state_t state;
 	device_state_get(&state);
 
-	// The live source moves under the player: the station's own name comes
-	// with the connection, the on-air title arrives later and keeps changing,
-	// the artwork lands when its download finishes -- and the whole thing
-	// ends by itself when a station drops for good. None of that goes through
-	// a track change, so it is followed here.
 	{
 		static bool was_live;
 		static unsigned last_serial;
 		unsigned serial = radio_now_serial();
-
 		if (state.live != was_live) {
 			was_live = state.live;
 			last_serial = serial;
-			// In or out of live: the whole display changes hands.
 			refresh_now_playing();
 			device_state_get(&state);
 		} else if (state.live && serial != last_serial) {
@@ -4167,128 +3345,144 @@ static void update_progress(void) {
 		}
 	}
 
-	// Asked on every poll and not only at a track change, for the routes that
-	// are not one: a phone claiming the output over AirPlay does not change the
-	// track -- it takes the DAC away under the one that is loaded -- and the
-	// answer here has to follow it. Two string compares and a struct copy,
-	// twice a second.
-	update_layout(&state);
-	// Likewise the transport: radio.txt can be reloaded under a station, which
-	// decides whether previous and next are there for it.
 	apply_live_mode(state.live);
 	apply_connecting();
 
-	// The bar itself is set by set_progress_label() below, which knows
-	// whether it stands for the file or for the chapter.
 	if (state.progress_total_secs > 0) {
 		current_total_length = state.progress_total_secs;
 	}
 
-	// The truth the smoothing works from, and the moment it was true. Taken
-	// here and not in the smoothing itself, so the two can never drift: every
-	// poll puts the interpolation back on the playback thread's own figure.
 	progress_anchor_secs = state.progress_current_secs;
 	progress_anchor_tick = lv_tick_get();
-	progress_running = state.status == AUDIO_STATUS_PLAYING && state.progress_total_secs > 0;
+	progress_running = (state.status == AUDIO_STATUS_PLAYING && state.progress_total_secs > 0);
 	smooth_timer_sync();
 
 	set_progress_label(state.progress_current_secs, current_total_length);
-	wave_refresh(cover_shown_path, state.progress_current_secs);
+	wave_refresh(state.current_file, state.progress_current_secs);
+
 	if (state.status == AUDIO_STATUS_PLAYING && !state.live) {
 		device_state_read_ahead(state.progress_current_secs, state.progress_total_secs);
 	}
 	lyrics_request(&state);
 	lyrics_follow(state.progress_current_secs);
 	apply_playback_status(state.status);
-	// Asked every poll rather than only on a track change: the answer comes
-	// from the audiobook index, which a scan finishing can change under a
-	// track that is already playing. Both answers come from the path every
-	// time -- a flag raised at start would have to be cleared on every route
-	// by which the track can change, and the first one forgotten leaves the
-	// player dressed as a podcast over a song.
-	apply_audiobook_mode(!state.live && audiobook_is_playing(),
-						 !state.live && podcastcache_is_episode(state.current_file));
-	update_format_label(&state); // the rate/bits settle shortly after the start
 
-	// The status LED follows playback promptly from here (the battery poll
-	// only comes round once a minute). Only writes when the colour changes.
-	// A podcast lights purple instead of the sample-rate colour.
-	led_update_playback(state.status == AUDIO_STATUS_PLAYING, state.stream_sample_rate,
-						!state.live && podcastcache_is_episode(state.current_file),
+	bool book = !state.live && audiobook_is_playing();
+	bool episode = !state.live && podcastcache_is_episode(state.current_file);
+	apply_audiobook_mode(book, episode);
+	update_format_label(&state);
+
+	led_update_playback(state.status == AUDIO_STATUS_PLAYING, state.stream_sample_rate, episode,
 						!state.live && audio_get_dsd_multiple() > 0);
 
-	// Where the book got to. Not the same thing as "remember track" below and
-	// not subject to its switch: that setting is about which track comes back
-	// on the next boot, while this is the whole point of a book -- it is
-	// remembered per book, it survives listening to something else in between,
-	// and turning it off would make the feature meaningless. Throttled inside
-	// audiobook_note_position(); forced whenever playback stops or pauses, so
-	// a shutdown loses at most a few seconds.
 	if (!state.live && audiobook_mode) {
 		bool stopped_itself = audiobook_auto_stop(&state);
-
 		static audio_status_t book_last_status = AUDIO_STATUS_STOPPED;
-		bool changed = state.status != book_last_status;
+		bool changed = (state.status != book_last_status);
 		book_last_status = state.status;
-		// Not when it has just stopped itself: that path already wrote the
-		// position it stopped at, and this snapshot is from before the seek.
 		if (!stopped_itself) {
 			audiobook_note_position(state.progress_current_secs, state.progress_total_secs,
 									changed || state.status != AUDIO_STATUS_PLAYING);
 		}
 	}
 
-	// Where a podcast episode got to, kept per episode in the same spirit:
-	// throttled inside podcaststate_note(), forced when the playback state
-	// changes.
-	if (!state.live && podcastcache_is_episode(state.current_file)) {
+	if (episode) {
 		static audio_status_t episode_last_status = AUDIO_STATUS_STOPPED;
-		bool episode_changed = state.status != episode_last_status;
+		bool episode_changed = (state.status != episode_last_status);
 		episode_last_status = state.status;
-		podcaststate_note(state.current_file, state.progress_current_secs, state.progress_total_secs,
-						  episode_changed);
+		podcaststate_note(state.current_file, state.progress_current_secs, state.progress_total_secs, episode_changed);
 	}
 
-	// "Remember track". The decision, and the writing, live in device_state.c:
-	// the power menu and the automatic shutdown have to do the same thing on
-	// their way out, and neither of them comes through here.
 	device_state_remember_note();
+
+	// Reconcile queue / shuffle / chaining mutations from outside Now Playing
+	{
+		static unsigned last_rev;
+		static playback_mode_t last_mode = (playback_mode_t)-1;
+		static int last_idx = -2;
+		static bool last_achain;
+		static bool last_fchain;
+		static bool last_book;
+		static bool last_pod_stop;
+
+		unsigned rev = playlist_revision();
+		playback_mode_t mode = playlist_get_mode();
+		int idx = playlist_current_index();
+		bool achain = device_state_album_chaining();
+		bool fchain = device_state_folder_chaining();
+		bool pod_stop = podcast_stop_at_episode_end();
+
+		if (rev != last_rev || mode != last_mode || idx != last_idx || achain != last_achain ||
+			fchain != last_fchain || book != last_book || pod_stop != last_pod_stop) {
+			last_rev = rev;
+			last_mode = mode;
+			last_idx = idx;
+			last_achain = achain;
+			last_fchain = fchain;
+			last_book = book;
+			last_pod_stop = pod_stop;
+			update_transport_modes();
+			upnext_refresh();
+			carousel_sync_adjacent_requests();
+			update_queue_and_shortcuts();
+		}
+	}
 }
 
-static void play_btn_event_cb(lv_event_t *e) {
-	(void)e;
-
-	// A live stream has no position to come back to, so this is a stop, not a
-	// pause: the connection goes, the station stays on screen, and pressing
-	// play again reconnects to it. Not while it is still connecting.
-	if (radio_is_active()) {
-		if (radio_is_connecting()) {
-			return;
-		}
-		if (radio_is_playing()) {
-			radio_stop();
-		} else {
-			radio_resume();
-		}
-		player_refresh_now_playing();
+static void smooth_timer_cb(lv_timer_t *timer) {
+	(void)timer;
+	if (!progress_running || view_length <= 0.1 || slider_dragging || !sheet_open || !power_screen_is_on()) {
 		return;
 	}
-
-	audio_status_t new_status = device_state_toggle_play_pause();
-	apply_playback_status(new_status); // optimistic UI update; next poll reconciles against the real status
+	double seconds = progress_anchor_secs + (double)lv_tick_elaps(progress_anchor_tick) / 1000.0;
+	if (seconds > view_start + view_length) {
+		seconds = view_start + view_length;
+	}
+	int value = view_value(seconds);
+	if (progress_slider && value != lv_slider_get_value(progress_slider)) {
+		lv_slider_set_value(progress_slider, value, LV_ANIM_OFF);
+	}
+	if (fs_slider && value != lv_slider_get_value(fs_slider)) {
+		lv_slider_set_value(fs_slider, value, LV_ANIM_OFF);
+	}
+	wave_preview(seconds);
+	lyrics_follow(seconds);
 }
 
-// What the on-screen prev/next buttons do. On a book or a podcast they are
-// jumps of seconds; on a track they are previous/next, Spotify style -- within
-// the first few seconds of a track prev moves to the previous one, later it
-// restarts the current one. Public so the control centre can do exactly this:
-// the same buttons cannot mean two different things in the two places. (The
-// physical side keys stay episode changes on a podcast: see
-// player_key_prev/next.)
-// Previous and next on a stream. True when the press was the stream's: it
-// changed station along the list the station came from, or there was nowhere
-// to go, or the station is still connecting (see apply_connecting()), and it
-// did nothing. False when no station is loaded and the press is the queue's.
+static void progress_slider_timer_cb(lv_timer_t *timer) {
+	(void)timer;
+	apply_cover_id_result();
+	apply_cover_result();
+	carousel_poll_adjacent();
+	update_progress();
+}
+
+static void sleep_timer_cb(lv_timer_t *timer) {
+	(void)timer;
+	bool expired = false;
+	for (int i = 0; i < SLEEPTIMER_COUNT; i++) {
+		expired = sleeptimer_expired((sleeptimer_kind_t)i) || expired;
+	}
+	if (!expired || audio_get_status() != AUDIO_STATUS_PLAYING) {
+		return;
+	}
+	if (audiobook_is_playing()) {
+		device_state_t state;
+		device_state_get(&state);
+		audiobook_suppress_rewind_once();
+		audio_pause();
+		apply_playback_status(AUDIO_STATUS_PAUSED);
+		audiobook_note_position(state.progress_current_secs, 0, true);
+		return;
+	}
+	audio_pause();
+	apply_playback_status(AUDIO_STATUS_PAUSED);
+}
+
+// ---------------------------------------------------------------------------
+// Transport Actions & Hardware Keys
+// ---------------------------------------------------------------------------
+
 static bool live_step(int step) {
 	if (!radio_is_active()) {
 		return false;
@@ -4298,39 +3492,54 @@ static bool live_step(int step) {
 	}
 	if (radio_step(step)) {
 		refresh_now_playing();
+		carousel_animate_from(step > 0 ? carousel_stride() / 2 : -carousel_stride() / 2);
 	}
 	return true;
+}
+
+static void play_btn_event_cb(lv_event_t *e) {
+	(void)e;
+	if (player_sheet_drag_active() || switcher_back_drag_active()) {
+		return;
+	}
+	if (radio_is_active()) {
+		if (radio_is_connecting()) return;
+		if (radio_is_playing()) {
+			radio_stop();
+		} else {
+			radio_resume();
+		}
+		player_refresh_now_playing();
+		return;
+	}
+	audio_status_t new_status = device_state_toggle_play_pause();
+	apply_playback_status(new_status);
 }
 
 void player_screen_prev(void) {
 	if (live_step(-1)) {
 		return;
 	}
-
 	device_state_t state;
 	device_state_get(&state);
 
-	// On a book these two are not "previous chapter" and "next chapter": they
-	// are ten seconds back and ten seconds on, which is what somebody who
-	// missed a sentence reaches for. Chapters have their own list.
 	if (audiobook_mode || podcast_mode) {
-		int back = podcast_mode && !audiobook_mode ? podcast_skip_back() : audiobook_skip_back();
+		int back = (podcast_mode && !audiobook_mode) ? podcast_skip_back() : audiobook_skip_back();
 		audiobook_seek_by(-(double)back, &state);
 		update_progress();
 		return;
 	}
 
-	// Past the first three seconds, prev restarts the track instead of leaving
-	// it: the same rule every player follows, so a double press is what goes
-	// back.
 	if (state.progress_current_secs > 3.0) {
-		device_state_seek(0); // far enough in -> restart current track
+		device_state_seek(0);
+		lyrics_centred = false;
+		lyrics_follow(0);
 	} else if (device_state_prev(NULL, 0)) {
-		refresh_now_playing(); // near the start -> go to previous track
+		refresh_now_playing();
+		carousel_animate_from(-carousel_stride() / 2);
 	} else {
-		device_state_seek(0); // no queue -> just restart
+		device_state_seek(0);
 	}
-
 	update_progress();
 }
 
@@ -4338,60 +3547,43 @@ void player_screen_next(void) {
 	if (live_step(1)) {
 		return;
 	}
-
 	if (audiobook_mode || podcast_mode) {
 		device_state_t state;
 		device_state_get(&state);
-		int fwd = podcast_mode && !audiobook_mode ? podcast_skip_forward() : audiobook_skip_forward();
+		int fwd = (podcast_mode && !audiobook_mode) ? podcast_skip_forward() : audiobook_skip_forward();
 		audiobook_seek_by((double)fwd, &state);
 		update_progress();
 		return;
 	}
-
 	if (device_state_next(NULL, 0)) {
 		refresh_now_playing();
+		carousel_animate_from(carousel_stride() / 2);
 	}
 	update_progress();
 }
 
 static void prev_btn_event_cb(lv_event_t *e) {
 	(void)e;
+	if (player_sheet_drag_active() || switcher_back_drag_active()) return;
 	player_screen_prev();
 }
 
 static void next_btn_event_cb(lv_event_t *e) {
 	(void)e;
+	if (player_sheet_drag_active() || switcher_back_drag_active()) return;
 	player_screen_next();
 }
-
-// --- hardware transport keys ---
-//
-// They do exactly what the on-screen buttons do, whichever page is showing:
-// the player does not have to be open for the keys on the side of the device
-// to work.
 
 void player_key_play_pause(void) {
 	apply_playback_status(device_state_toggle_play_pause());
 }
 
 void player_key_next(void) {
-	if (live_step(1)) {
-		return;
-	}
-
-	// On a track coming from DLNA, "next" is a question for the phone: the
-	// queue is its own.
+	if (live_step(1)) return;
 	if (dlna_owns_playback()) {
 		dlna_request_next();
 		return;
 	}
-
-	// The side keys stay previous/next track on a podcast, deliberately. A
-	// book is a single file, so "next track" means nothing there and the keys
-	// become jumps. A podcast sits in a real queue of episodes: if the side
-	// keys also jumped thirty seconds, there would be no way to reach the next
-	// episode without opening the queue. This way both exist -- jumps on
-	// screen, episode change under the finger.
 	if (audiobook_mode) {
 		device_state_t state;
 		device_state_get(&state);
@@ -4399,24 +3591,19 @@ void player_key_next(void) {
 		update_progress();
 		return;
 	}
-
 	if (device_state_next(NULL, 0)) {
 		refresh_now_playing();
+		carousel_animate_from(carousel_stride() / 2);
 	}
 	update_progress();
 }
 
 void player_key_prev(void) {
-	if (live_step(-1)) {
-		return;
-	}
-
+	if (live_step(-1)) return;
 	device_state_t state;
 	device_state_get(&state);
 
 	if (dlna_owns_playback()) {
-		// As elsewhere: within the first few seconds go back to the start,
-		// later ask for the previous track -- only here the phone is asked.
 		if (state.progress_current_secs > 3.0) {
 			device_state_seek(0);
 		} else {
@@ -4424,25 +3611,24 @@ void player_key_prev(void) {
 		}
 		return;
 	}
-
 	if (audiobook_mode) {
 		audiobook_seek_by(-(double)audiobook_skip_back(), &state);
 		update_progress();
 		return;
 	}
-
 	if (state.progress_current_secs > 3.0) {
 		device_state_seek(0);
+		lyrics_centred = false;
+		lyrics_follow(0);
 	} else if (device_state_prev(NULL, 0)) {
 		refresh_now_playing();
+		carousel_animate_from(-carousel_stride() / 2);
 	} else {
 		device_state_seek(0);
 	}
 	update_progress();
 }
 
-// The book's menu. A book with no chapters still lists them, and says so when
-// asked: a plainer answer than an entry that comes and goes between books.
 static void book_chapters_action(void *user) {
 	(void)user;
 	if (audiobook_has_chapters) {
@@ -4467,9 +3653,10 @@ static void book_summary_action(void *user) {
 	audiobookextras_open_current_summary();
 }
 
-// The overflow button: the book's menu on a book, the episode queue on a
-// podcast, the track menu on anything else.
 static void more_btn_event_cb(lv_event_t *e) {
+	if (player_sheet_drag_active() || switcher_back_drag_active()) {
+		return;
+	}
 	if (audiobook_mode) {
 		static const popover_item_t BOOK_ITEMS[] = {
 			{"chapters", book_chapters_action, NULL},
@@ -4480,8 +3667,6 @@ static void more_btn_event_cb(lv_event_t *e) {
 		popover_show(lv_event_get_current_target(e), BOOK_ITEMS, (int)(sizeof(BOOK_ITEMS) / sizeof(BOOK_ITEMS[0])));
 		return;
 	}
-	// A podcast has no chapters: it has episodes, and the episodes are already
-	// the queue. The button goes straight there.
 	if (podcast_mode) {
 		trackmenu_open_queue();
 		return;
@@ -4489,99 +3674,23 @@ static void more_btn_event_cb(lv_event_t *e) {
 	trackmenu_open(lv_event_get_current_target(e));
 }
 
-// Steps to the next playback mode: normal, loop the queue, loop the track,
-// shuffle once through, shuffle round and round.
-static void repeat_btn_event_cb(lv_event_t *e) {
+static void open_queue_btn_cb(lv_event_t *e) {
 	(void)e;
-	playlist_cycle_mode();
-	update_repeat_button();
-}
-
-static void progress_slider_event_cb(lv_event_t *e) {
-	lv_event_code_t code = lv_event_get_code(e);
-
-	if (code == LV_EVENT_PRESSED) {
-		lv_timer_pause(progress_slider_timer); // the poll must not fight the finger
-		if (smooth_timer) {
-			lv_timer_pause(smooth_timer); // nor the smoothing, which would drag it back
-		}
-	}
-
-	if (code == LV_EVENT_RELEASED) {
-		lv_timer_resume(progress_slider_timer);
-
-		int value = lv_slider_get_value(progress_slider);
-
-		double seconds = view_seconds(value);
-
-		device_state_seek(seconds);
-
-		lv_timer_resume(progress_slider_timer);
-	}
-
-	if (code == LV_EVENT_VALUE_CHANGED) {
-		// While dragging, the left clock previews where the knob would land.
-		int value = lv_slider_get_value(progress_slider);
-
-		double seconds = view_seconds(value);
-
-		formatDoubleSeconds(seconds - view_start, progress_label_text, sizeof(progress_label_text));
-		lv_label_set_text(elapsed_label, progress_label_text);
-
-		// And so does the waveform, when that is what is being dragged. The
-		// poll is paused for the duration of the press, so without this the
-		// bars would stand still under the finger and only jump at the release.
-		wave_preview(seconds);
-	}
-}
-
-// The poll: collects finished artwork and reconciles the UI with playback.
-// Carries the bar and the shape of the track forward between polls.
-//
-// Draws nothing unless the picture would change: the slider is told a value
-// only when its own scale says a different one, and the waveform only when the
-// playhead has crossed into another pixel. Both are compared against what was
-// last drawn rather than against what was last computed, so a tick that changes
-// nothing costs nothing.
-static void smooth_timer_cb(lv_timer_t *timer) {
-	(void)timer;
-	if (!progress_running || view_length <= 0.1) {
+	if (player_sheet_drag_active() || switcher_back_drag_active()) {
 		return;
 	}
-	// Nothing is drawn for a screen nobody is looking at, or for a page that is
-	// not the one on show. Drawing a dark panel is work this device cannot
-	// spare and has paid for before.
-	if (!sheet_open || !power_screen_is_on()) {
-		return;
-	}
-
-	double seconds = progress_anchor_secs + (double)lv_tick_elaps(progress_anchor_tick) / 1000.0;
-	if (seconds > view_start + view_length) {
-		seconds = view_start + view_length; // the poll will say what happens next
-	}
-
-	int value = view_value(seconds);
-	if (value != lv_slider_get_value(progress_slider)) {
-		lv_slider_set_value(progress_slider, value, LV_ANIM_OFF);
-	}
-	wave_preview(seconds);
-	lyrics_follow(seconds);
+	trackmenu_open_queue();
 }
 
-static void progress_slider_timer_cb(lv_timer_t *timer) {
-	(void)timer;
-	apply_cover_id_result(); // "is the new track's picture the one already up?"
-	apply_cover_result();	 // artwork the worker has finished since last tick
-	update_progress();
-}
+// ---------------------------------------------------------------------------
+// Public Entry Points & Preferences API
+// ---------------------------------------------------------------------------
 
-// The boot-time restore: the remembered track, paused at its position.
 void player_restore_track(const char *filepath, double position) {
 	device_state_restore_file(filepath, position);
 	player_refresh_now_playing();
 }
 
-// The same, with the queue that was saved alongside it.
 void player_restore_index(library_index_t *ix, int start_index, const char *const *extra, const int *extra_slots,
 						  int extra_count, const char *filepath, double position) {
 	device_state_restore_index(ix, start_index, extra, extra_slots, extra_count, filepath, position);
@@ -4594,173 +3703,221 @@ void player_restore_list(const char *const *list, int count, int start_index, bo
 	player_refresh_now_playing();
 }
 
-// Loads and starts a new file, updating the now-playing info. Also rebuilds
-// the folder queue inside device_state, so playback carries on to the
-// following tracks when this one finishes.
 void player_play_file(const char *filepath) {
-	device_state_play_file(filepath); // builds folder queue, loads metadata, starts playback
-
+	device_state_play_file(filepath);
 	player_refresh_now_playing();
 }
 
-// audio_pause() rather than device_state_toggle_play_pause(): this is a pause,
-// not a toggle, and the toggle would start a stopped radio station playing
-// again. The button glyph is corrected here rather than left to the next poll
-// because half a second of a pause button over a paused track reads as a
-// control that did not take.
-player_layout_t player_layout_get(void) { return layout_choice; }
-
-bool player_cover_accent(void) { return cover_accent; }
-
-void player_cover_accent_set(bool on) {
-	if (on == cover_accent) {
-		return;
-	}
-	cover_accent = on;
-	config_set_bool("screen", "cover_accent", on);
-	config_save();
-	paint_transport_tint();
-}
-
-void player_layout_set(player_layout_t layout) {
-	if (layout == layout_choice) {
-		return;
-	}
-	layout_choice = layout;
-	config_set_int("screen", "player_layout_alt", (int)layout);
-	config_save();
-
-	// Not apply_layout() directly: choosing Alternative while a radio station
-	// is on must not put the alternative arrangement up. What the setting does
-	// is change the answer update_layout() will give, so it is asked again.
-	device_state_t state;
-	device_state_get(&state);
-	update_layout(&state);
-}
-
-void player_output_unplugged(const char *what) {
-	if (audio_get_status() != AUDIO_STATUS_PLAYING) {
-		return;
-	}
-	printf("player: %s unplugged; pausing\n", what ? what : "the output");
-	audio_pause();
-	apply_playback_status(AUDIO_STATUS_PAUSED);
-}
-
-// A pause and not a stop, and for the same reason as the one above: the point
-// of falling asleep to something is finding it where it was in the morning.
-static void sleep_timer_cb(lv_timer_t *timer) {
-	(void)timer;
-	bool expired = false;
-	for (int i = 0; i < SLEEPTIMER_COUNT; i++) {
-		expired = sleeptimer_expired((sleeptimer_kind_t)i) || expired;
-	}
-	if (!expired || audio_get_status() != AUDIO_STATUS_PLAYING) {
-		return;
-	}
-
-	// A book being put down has two things to settle that a track does not: the
-	// rewind that the next play would otherwise add -- it is for a sentence
-	// somebody interrupted, not for one the player stopped on purpose -- and
-	// the position, written through rather than left to the ten second throttle.
-	if (audiobook_is_playing()) {
-		device_state_t state;
-		device_state_get(&state);
-		audiobook_suppress_rewind_once();
-		audio_pause();
-		apply_playback_status(AUDIO_STATUS_PAUSED);
-		audiobook_note_position(state.progress_current_secs, 0, true);
-		return;
-	}
-
-	audio_pause();
-	apply_playback_status(AUDIO_STATUS_PAUSED);
-}
-
-// The artist line again, after "Use track artist" has been switched. Not a
-// whole refresh_now_playing(): nothing else on the page has changed, and that
-// would decode the cover and ask for the lyrics all over again.
 void player_refresh_artist(void) {
-	if (!song_artist_label) {
-		return;
-	}
+	if (!song_artist_label) return;
 	device_state_t state;
 	device_state_get(&state);
-	if (state.live || !state.current_file[0]) {
-		return;
-	}
-	scrolltext_set(song_artist_label, metadata_shown_artist(&state.metadata));
-	lyrics_head_sync();
-	alt_pills_sync();
+	if (state.live || !state.current_file[0]) return;
+	const char *artist = metadata_shown_artist(&state.metadata);
+	scrolltext_set(song_artist_label, artist ? artist : "");
+	sync_fs_metadata(lv_label_get_text(song_title_label), artist ? artist : "");
 }
 
-// Public face of refresh_now_playing, for callers that started playback
-// through device_state themselves (the library lists hand over a whole
-// queue rather than a single file).
 void player_refresh_now_playing(void) {
 	refresh_now_playing();
-
-	// Playback may have been started by something that also set the mode --
-	// the favourites shuffle button forces shuffle on its way in -- so the
-	// repeat/shuffle glyph is refreshed here too, not only when it is tapped.
-	update_repeat_button();
-
+	update_transport_modes();
 	device_state_t state;
 	device_state_get(&state);
 	apply_playback_status(state.status);
 }
 
+void player_output_unplugged(const char *what) {
+	if (audio_get_status() != AUDIO_STATUS_PLAYING) return;
+	printf("player: %s unplugged; pausing\n", what ? what : "the output");
+	audio_pause();
+	apply_playback_status(AUDIO_STATUS_PAUSED);
+}
+
+player_layout_t player_layout_get(void) { return layout_choice; }
+
+void player_layout_set(player_layout_t layout) {
+	layout_choice = layout;
+	config_set_int("screen", "player_layout_alt", (int)layout);
+	config_save();
+}
+
+bool player_cover_accent(void) { return adaptive_accent; }
+
+void player_cover_accent_set(bool on) {
+	if (on == adaptive_accent) return;
+	adaptive_accent = on;
+	config_set_int("ambient", "accent_mode", on ? 1 : 0);
+	config_set_bool("screen", "cover_accent", on);
+	config_save();
+	recompute_palette(true);
+}
+
+player_lyrics_mode_t player_lyrics_default_mode(void) { return lyrics_default_mode; }
+
+void player_lyrics_set_default_mode(player_lyrics_mode_t mode) {
+	lyrics_default_mode = (mode == PLAYER_LYRICS_FULLSCREEN) ? PLAYER_LYRICS_FULLSCREEN : PLAYER_LYRICS_INTEGRATED;
+	config_set_int("lyrics", "default_mode", (int)lyrics_default_mode);
+	config_save();
+}
+
+bool player_lyrics_remember_mode(void) { return lyrics_remember_mode; }
+
+void player_lyrics_set_remember_mode(bool on) {
+	lyrics_remember_mode = on;
+	config_set_bool("lyrics", "remember_mode", on);
+	config_save();
+}
+
+player_lyrics_text_size_t player_lyrics_text_size(void) { return lyrics_text_size; }
+
+void player_lyrics_set_text_size(player_lyrics_text_size_t size) {
+	if ((int)size < 0 || (int)size > 2) {
+		size = PLAYER_LYRICS_TEXT_MEDIUM;
+	}
+	if (lyrics_text_size == size) return;
+	lyrics_text_size = size;
+	config_set_int("lyrics", "text_size", (int)size);
+	config_save();
+	lyrics_update_padding();
+	lyrics_apply_line_styles();
+	lyrics_centred = false;
+	device_state_t st;
+	device_state_get(&st);
+	lyrics_follow(st.progress_current_secs);
+}
+
+int player_lyrics_offset_ms(void) { return lyrics_offset_ms; }
+
+void player_lyrics_set_offset_ms(int offset_ms) {
+	if (offset_ms < -LYRICS_OFFSET_LIMIT_MS) offset_ms = -LYRICS_OFFSET_LIMIT_MS;
+	if (offset_ms > LYRICS_OFFSET_LIMIT_MS) offset_ms = LYRICS_OFFSET_LIMIT_MS;
+	if (lyrics_offset_ms == offset_ms) return;
+	lyrics_offset_ms = offset_ms;
+	config_set_int("lyrics", "offset_ms", offset_ms);
+	config_save();
+	update_fs_offset_labels();
+	lyrics_centred = false;
+	device_state_t st;
+	device_state_get(&st);
+	lyrics_follow(st.progress_current_secs);
+}
+
+void player_register_state_cb(player_state_cb_t cb) {
+	if (!cb || state_cb_count >= MAX_PLAYER_STATE_CBS) return;
+	for (int i = 0; i < state_cb_count; i++) {
+		if (state_cbs[i] == cb) return;
+	}
+	state_cbs[state_cb_count++] = cb;
+}
+
+static void notify_state_cbs(void) {
+	for (int i = 0; i < state_cb_count; i++) {
+		state_cbs[i]();
+	}
+}
 
 // ---------------------------------------------------------------------------
-// the sheet: dragging the player in and out
+// Sheet Open / Close & Status Bar Integration
 // ---------------------------------------------------------------------------
 
-// How far across the screen the drag has to get before letting go opens (or
-// closes) it rather than snapping back. A third is enough to feel deliberate
-// without demanding the whole width.
 #define SHEET_COMMIT_FRACTION 3
-
-#define SHEET_ANIM_MS 220
-
-// Sideways movement past this is a drag, not a tap.
 #define DRAG_COMMIT_PX 10
 
-static int sheet_width;
-static lv_obj_t *sheet_under; // the page the sheet first slid over
+static void bar_over_player_update(void) {
+	if (!sheet_open) {
+		return;
+	}
+	if (bar_always) {
+		topbar_set_hidden(false);
+		// Transparent over our dark ambient surface, crisp white glyphs, zero software blur.
+		topbar_set_over_artwork(true, false);
+	} else {
+		topbar_set_over_artwork(false, false);
+		topbar_set_hidden(true);
+	}
+}
 
-// Where the sheet was when the finger went down, and where the finger was.
-static int drag_origin_x;
-static lv_point_t drag_start_point;
-static bool dragging;
+bool player_statusbar_always(void) { return bar_always; }
 
-// True once a gesture has moved far enough sideways to count as a drag. Read
-// by the tap handlers on the pages behind, so that swiping across a menu tile
-// does not also select it.
-static bool drag_committed;
+static void relayout_screen_vertical(void) {
+	if (!header_row || !stage_container) {
+		return;
+	}
+	gui_config_t cfg_snap = {
+		.screen_width = (uint32_t)screen_w,
+		.screen_height = (uint32_t)screen_h,
+		.padding = 15,
+		.top_bar_height = (int8_t)bar_height,
+		.sd_root_path = NULL,
+	};
+	compute_geometry(&cfg_snap);
+
+	int cy = back_btn_centre_y();
+	lv_obj_set_pos(header_row, 0, cy - header_h / 2);
+	lv_obj_set_size(header_row, screen_w, header_h);
+
+	stage_y = cy + header_h / 2 + 4;
+	lv_obj_set_pos(stage_container, 0, stage_y);
+	lv_obj_set_size(stage_container, screen_w, stage_h);
+	lv_obj_set_size(carousel_stage, screen_w, stage_h);
+	lv_obj_set_pos(integrated_lyrics_box, side_margin, 0);
+	lv_obj_set_size(integrated_lyrics_box, content_w, stage_h);
+
+	int y = stage_y + stage_h + (is_tall_panel ? 8 : 6);
+	int info_h = is_tall_panel ? 74 : 66;
+	lv_obj_set_pos(track_info_row, side_margin, y);
+	lv_obj_set_size(track_info_row, content_w, info_h);
+	y += info_h + (is_tall_panel ? 4 : 2);
+
+	int wsec_h = wave_h + 26;
+	lv_obj_set_pos(wave_section, side_margin, y);
+	lv_obj_set_size(wave_section, content_w, wsec_h);
+	y += wsec_h + (is_tall_panel ? 6 : 4);
+
+	int ctrl_h = is_tall_panel ? 76 : 68;
+	lv_obj_set_pos(controls_row, side_margin, y);
+	lv_obj_set_size(controls_row, content_w, ctrl_h);
+	y += ctrl_h + (is_tall_panel ? 4 : 2);
+
+	int foot_h = screen_h - y - 4;
+	if (foot_h < 38) foot_h = 38;
+	if (foot_h > 50) foot_h = 50;
+	lv_obj_set_pos(shortcuts_row, side_margin, screen_h - foot_h - 4);
+	lv_obj_set_size(shortcuts_row, content_w, foot_h);
+
+	slot_apply_geometry(&cslots[0], peek_box);
+	slot_apply_geometry(&cslots[1], hero_box);
+	slot_apply_geometry(&cslots[2], peek_box);
+	carousel_layout_slots();
+	layout_fs_stage();
+	if (lyrics_state == LYRICS_VIEW_INTEGRATED) {
+		lyrics_reparent_shared_stage(integrated_lyrics_box, content_w - 24, stage_h, false);
+		if (int_lyrics_search_btn) lv_obj_move_foreground(int_lyrics_search_btn);
+		if (int_lyrics_expand_btn) lv_obj_move_foreground(int_lyrics_expand_btn);
+	}
+}
+
+void player_set_statusbar_always(bool on) {
+	if (on == bar_always) {
+		return;
+	}
+	bar_always = on;
+	back_btn_player_below_bar(on);
+	relayout_screen_vertical();
+	bar_over_player_update();
+}
 
 static void sheet_anim_x_cb(void *obj, int32_t value) {
 	lv_obj_set_x((lv_obj_t *)obj, (int)value);
-	// The chevron belongs to the sheet while it moves: ride its edge, and
-	// snap back into the page's corner once the sheet is fully away.
 	back_btn_translate(value >= sheet_width ? 0 : value);
 }
 
-// Moves the sheet to `x` (0 = fully open, sheet_width = fully out of the way).
 static void sheet_move_to(int x, bool animate) {
-	if (x < 0) {
-		x = 0;
-	}
-	if (x > sheet_width) {
-		x = sheet_width;
-	}
-
-	// Never race a slide that is still running. A slide left to finish after a
-	// new one has started parks the sheet off screen while everything else
-	// believes it is open -- the page underneath showing, no status bar, and no
-	// way back to the player.
+	if (x < 0) x = 0;
+	if (x > sheet_width) x = sheet_width;
 	lv_anim_delete(player_screen, sheet_anim_x_cb);
 
-	if (!animate) {
+	if (!animate || theme_reduced_motion()) {
 		lv_obj_set_x(player_screen, x);
 		back_btn_translate(x >= sheet_width ? 0 : x);
 		return;
@@ -4777,95 +3934,30 @@ static void sheet_move_to(int x, bool animate) {
 }
 
 bool player_sheet_is_open(void) { return sheet_open; }
-
 bool player_sheet_drag_active(void) { return drag_committed; }
 
-// The status bar over the open player, when it stays up there: blurring the
-// cover under it, on nothing in Studio -- the blurred picture behind
-// everything is already there -- and in the page's own colours while there is
-// no picture at all, where white would be lost on a light theme.
-static void bar_over_player_update(void) {
-	if (!sheet_open || !bar_always) {
-		return;
-	}
-	topbar_set_hidden(false);
-	if (!current_cover.pixels) {
-		topbar_set_over_artwork(false, false);
-		return;
-	}
-	topbar_set_over_artwork(true, !layout_studio_now);
-}
-
-bool player_statusbar_always(void) { return bar_always; }
-
-void player_set_statusbar_always(bool on) {
-	if (on == bar_always) {
-		return;
-	}
-	bar_always = on;
-	back_btn_player_below_bar(on);
-
-	// The marks in the artwork's corner, and everything lined up with the
-	// chevron, follow it down or back up.
-	if (!studio_up) {
-		lv_obj_t *const marks[] = {live_badge, qobuz_badge, tidal_badge, podcast_badge};
-		for (size_t i = 0; i < sizeof(marks) / sizeof(marks[0]); i++) {
-			if (marks[i]) {
-				lv_obj_align(marks[i], LV_ALIGN_TOP_RIGHT, -BADGE_INSET, badge_top());
-			}
-		}
-	}
-	if (layout_studio_now) {
-		studio_place();
-	}
-	lyrics_layout();
-
-	if (!on) {
-		if (sheet_open) {
-			topbar_set_over_artwork(false, false);
-			topbar_set_hidden(true);
-		}
-		return;
-	}
-	bar_over_player_update();
-}
-
 void player_sheet_open(bool animate) {
-	// Nothing to show while another mode owns the sound: the sheet is about a
-	// track this player is playing, and in Bluetooth receiver mode the track is
-	// on somebody else's machine. Refusing to open is the honest answer -- an
-	// opened sheet would show the last thing played here, paused, over music
-	// that is coming out of the jack right now.
 	if (btreceiver_is_active()) {
 		return;
 	}
-
 	if (!sheet_open) {
-		// Remember the opener: leaving the player must always land back here,
-		// whatever the pages under the sheet did in the meantime.
 		sheet_under = lv_screen_active();
 	}
 	sheet_open = true;
 	smooth_timer_sync();
 	back_btn_player_mode(true);
+	back_btn_over_cover(true);
+	if (lyrics_state == LYRICS_VIEW_FULLSCREEN) {
+		back_btn_force_hidden(true);
+	}
 	lyrics_screen_hold_update();
+	upnext_refresh();
+	carousel_sync_adjacent_requests();
+	update_queue_and_shortcuts();
 
-	// Explicitly the bottom-most thing on the top layer: it covers the page it
-	// slides over, while the status bar and the floating back button stay drawn
-	// above it, exactly where the page underneath put them. Nothing shared is
-	// moved or hidden, so nothing shared slides around during the drag.
 	lv_obj_set_hidden(player_screen, false);
 	lv_obj_move_background(player_screen);
-
-	// Artwork runs to the top edge here, so the bar steps aside. It is hidden
-	// rather than moved, which is why nothing slides during the drag. Unless
-	// it is to stay up: then it goes over the artwork.
-	if (bar_always) {
-		bar_over_player_update();
-	} else {
-		topbar_set_hidden(true);
-	}
-
+	bar_over_player_update();
 	sheet_move_to(0, animate);
 }
 
@@ -4874,33 +3966,30 @@ static void sheet_hidden_anim_ready_cb(lv_anim_t *a) {
 	if (!sheet_open) {
 		lv_obj_set_hidden(player_screen, true);
 	}
-	// Whatever page the close landed on, the chevron's visibility is settled
-	// once more now that the last animation frame has run -- the fix for the
-	// chevron flashing on the main menu for a frame on the way back to it.
 	back_btn_sync_visibility();
 }
 
 void player_sheet_close(bool animate) {
+	lv_anim_delete(&carousel_anim_tag, carousel_offset_exec_cb);
+	lv_anim_delete(&pal_anim_tag, palette_anim_exec_cb);
+	carousel_offset_px = 0;
+
 	bool was_open = sheet_open;
 	sheet_open = false;
 	smooth_timer_sync();
+	back_btn_force_hidden(false);
+	back_btn_over_cover(false);
 	back_btn_player_mode(false);
 	lyrics_screen_hold_update();
 	topbar_set_over_artwork(false, false);
 	topbar_set_hidden(false);
-	// The tab does not travel with the page: coming back to a player with a
-	// panel hanging open is not what leaving it looked like.
 
-	// Back where the player was opened from, always: if anything switched the
-	// page underneath while the sheet was up, put the opener back.
 	if (was_open && sheet_under && lv_screen_active() != sheet_under) {
 		switch_screen_no_history(sheet_under);
 	}
-	// The page underneath stays loaded while the sheet covers it, so nothing
-	// tells it to look at its list again.
 	medialist_refresh_visible();
 
-	if (!animate) {
+	if (!animate || theme_reduced_motion()) {
 		lv_obj_set_x(player_screen, sheet_width);
 		back_btn_translate(0);
 		lv_obj_set_hidden(player_screen, true);
@@ -4919,59 +4008,37 @@ void player_sheet_close(bool animate) {
 	lv_anim_start(&a);
 }
 
-// Runs from lv_async_call, one tick after the gesture's own events (RELEASED,
-// then CLICKED) have all been delivered: the suppression the flag exists for
-// has happened by then, and nothing later may still be blocked by it.
 static void drag_committed_clear_cb(void *unused) {
 	(void)unused;
 	drag_committed = false;
 }
 
-// One handler for both directions. `opening` is passed as the user data: true
-// when the drag starts on something behind the sheet, false when it starts on
-// the sheet itself.
 static void sheet_drag_cb(lv_event_t *e) {
 	bool opening = (bool)(uintptr_t)lv_event_get_user_data(e);
 	lv_event_code_t code = lv_event_get_code(e);
-
 	lv_indev_t *indev = lv_indev_active();
-	if (!indev) {
-		return;
-	}
+	if (!indev) return;
 
 	if (code == LV_EVENT_PRESSED) {
-		if (opening == sheet_open) {
-			return; // dragging the wrong way for the current state
-		}
-
+		if (opening == sheet_open) return;
 		lv_indev_get_point(indev, &drag_start_point);
 		drag_origin_x = opening ? sheet_width : 0;
 		dragging = true;
-
 		drag_committed = false;
-
 		if (opening) {
-			// It has to be on screen to be dragged, even if only by a pixel.
 			lv_obj_set_hidden(player_screen, false);
 			lv_obj_move_background(player_screen);
 			lv_obj_set_x(player_screen, sheet_width);
 		}
 		return;
 	}
-
-	if (!dragging) {
-		return;
-	}
+	if (!dragging) return;
 
 	lv_point_t point;
 	lv_indev_get_point(indev, &point);
 	int dx = point.x - drag_start_point.x;
 
 	if (code == LV_EVENT_PRESSING) {
-		// Vertical scrolling must still work: the moment LVGL is scrolling
-		// something this press is a scroll, and once the movement reads as
-		// vertical it stays a scroll -- no more sideways shimmy of the page
-		// during a fast flick.
 		if (!drag_committed) {
 			if (lv_indev_get_scroll_obj(indev)) {
 				dragging = false;
@@ -4987,52 +4054,40 @@ static void sheet_drag_cb(lv_event_t *e) {
 			}
 			drag_committed = true;
 		}
-
 		sheet_move_to(drag_origin_x + dx, false);
 		return;
 	}
 
 	if (code == LV_EVENT_RELEASED || code == LV_EVENT_PRESS_LOST) {
 		dragging = false;
-
 		int travelled = opening ? -dx : dx;
 		bool commit = travelled > (sheet_width / SHEET_COMMIT_FRACTION);
-
 		if (opening) {
 			commit ? player_sheet_open(true) : player_sheet_close(true);
 		} else {
 			commit ? player_sheet_close(true) : player_sheet_open(true);
 		}
-
-		// The flag must not outlive the gesture. Waiting for the next PRESSED on
-		// an attached object is not enough -- the browser list is not one, so
-		// every tap on a row after a swipe would be discarded as part of a drag.
-		// Deferred rather than cleared here, because the CLICKED event of this
-		// same gesture still has to see it.
 		lv_async_call(drag_committed_clear_cb, NULL);
 	}
 }
 
-// The control centre, from the player too.
-//
-// Every other page pulls it down from the status bar, and this page hides the
-// status bar, so there is nothing to pull. This strip stands in for it:
-// the same gesture, in the same place, on a piece of the artwork that has
-// nothing else to do. The bar comes back for as long as the sheet is up (see
-// quickpanel.c), so what the finger lands on afterwards is what it expected.
-//
-// Vertical dominance is required before it engages: a sideways drag across the
-// top of the artwork is somebody putting the player away, not somebody
-// reaching for the brightness.
+void player_sheet_attach_drag(lv_obj_t *obj, bool opening) {
+	if (!obj) return;
+	lv_obj_set_clickable(obj, true);
+	lv_obj_add_event_cb(obj, sheet_drag_cb, LV_EVENT_PRESSED, (void *)(uintptr_t)opening);
+	lv_obj_add_event_cb(obj, sheet_drag_cb, LV_EVENT_PRESSING, (void *)(uintptr_t)opening);
+	lv_obj_add_event_cb(obj, sheet_drag_cb, LV_EVENT_RELEASED, (void *)(uintptr_t)opening);
+	lv_obj_add_event_cb(obj, sheet_drag_cb, LV_EVENT_PRESS_LOST, (void *)(uintptr_t)opening);
+}
+
+// Control centre pull-down when statusbar_always is off
 static void panel_edge_drag_cb(lv_event_t *e) {
 	static lv_point_t start;
 	static bool tracking;
 	static bool engaged;
 
 	lv_indev_t *indev = lv_indev_active();
-	if (!indev) {
-		return;
-	}
+	if (!indev) return;
 
 	lv_event_code_t code = lv_event_get_code(e);
 	if (code == LV_EVENT_PRESSED) {
@@ -5041,9 +4096,7 @@ static void panel_edge_drag_cb(lv_event_t *e) {
 		engaged = false;
 		return;
 	}
-	if (!tracking) {
-		return;
-	}
+	if (!tracking) return;
 
 	lv_point_t p;
 	lv_indev_get_point(indev, &p);
@@ -5053,16 +4106,13 @@ static void panel_edge_drag_cb(lv_event_t *e) {
 	if (code == LV_EVENT_PRESSING) {
 		if (!engaged) {
 			int adx = dx < 0 ? -dx : dx;
-			if (dy < 8 || dy <= adx) {
-				return; // still just a press, or a sideways one
-			}
+			if (dy < 8 || dy <= adx) return;
 			engaged = true;
 			quickpanel_drag_begin();
 		}
 		quickpanel_drag_update(dy);
 		return;
 	}
-
 	if (code == LV_EVENT_RELEASED || code == LV_EVENT_PRESS_LOST) {
 		tracking = false;
 		if (engaged) {
@@ -5072,612 +4122,725 @@ static void panel_edge_drag_cb(lv_event_t *e) {
 	}
 }
 
-void player_sheet_attach_drag(lv_obj_t *obj, bool opening) {
-	if (!obj) {
-		return;
-	}
-
-	lv_obj_set_clickable(obj, true);
-	lv_obj_add_event_cb(obj, sheet_drag_cb, LV_EVENT_PRESSED, (void *)(uintptr_t)opening);
-	lv_obj_add_event_cb(obj, sheet_drag_cb, LV_EVENT_PRESSING, (void *)(uintptr_t)opening);
-	lv_obj_add_event_cb(obj, sheet_drag_cb, LV_EVENT_RELEASED, (void *)(uintptr_t)opening);
-	lv_obj_add_event_cb(obj, sheet_drag_cb, LV_EVENT_PRESS_LOST, (void *)(uintptr_t)opening);
+static void player_refresh_theme(void) {
+	recompute_palette(false);
 }
 
-// Builds the player sheet: artwork, controls and the poll that drives them.
+static void player_on_font_change(void) {
+	lyrics_update_padding();
+	lyrics_apply_line_styles();
+}
+
+// ---------------------------------------------------------------------------
+// Screen Construction (`player_init`)
+// ---------------------------------------------------------------------------
+
+static lv_obj_t *make_icon_btn(lv_obj_t *parent, int w, int h, const lv_image_dsc_t *src, lv_event_cb_t cb,
+							   void *user_data, lv_obj_t **icon_out) {
+	lv_obj_t *btn = lv_btn_create(parent);
+	lv_obj_remove_style_all(btn);
+	lv_obj_set_size(btn, w, h);
+	lv_obj_set_style_radius(btn, LV_RADIUS_CIRCLE, 0);
+	lv_obj_set_style_bg_color(btn, lv_color_white(), LV_STATE_PRESSED);
+	lv_obj_set_style_bg_opa(btn, LV_OPA_10, LV_STATE_PRESSED);
+	lv_obj_set_style_opa(btn, LV_OPA_40, LV_STATE_DISABLED);
+	if (cb) {
+		lv_obj_add_event_cb(btn, cb, LV_EVENT_CLICKED, user_data);
+	}
+	lv_obj_t *ic = lv_image_create(btn);
+	if (src) {
+		lv_image_set_src(ic, src);
+	}
+	lv_obj_center(ic);
+	lv_obj_set_clickable(ic, false);
+	lv_obj_set_event_bubble(ic, true);
+	if (icon_out) {
+		*icon_out = ic;
+	}
+	return btn;
+}
+
 void player_init(gui_config_t *cfg) {
-	// The artwork decodes on the shared worker; make sure it exists before
-	// the first track can be started. Safe to call more than once.
 	coverloader_start();
-	// The next track's picture is not read ahead once the cover side has no
-	// use for it.
 	readahead_set_picture_known(cover_picture_known);
+	upnext_init(on_upnext_resolved);
 
-	lv_obj_add_style(player_screen, &theme_style_screen, 0);
+	// Load persisted preferences with backward-compatible defaults
+	bar_height = (int)cfg->top_bar_height;
+	bar_always = config_get_int("screen", "statusbar_always", 1) != 0;
+	back_btn_player_below_bar(bar_always);
 
-	// The player is a panel parked just off the right edge (see player.h).
-	sheet_width = (int)cfg->screen_width;
-	lv_obj_set_size(player_screen, cfg->screen_width, cfg->screen_height);
-	lv_obj_set_style_pad_all(player_screen, 0, 0);
-	lv_obj_set_style_border_width(player_screen, 0, 0);
-	lv_obj_set_style_radius(player_screen, 0, 0);
-	lv_obj_set_scrollable(player_screen, false);
+	int saved_layout = (int)config_get_int("screen", "player_layout_alt", 0);
+	layout_choice = (saved_layout == (int)PLAYER_LAYOUT_ALTERNATIVE) ? PLAYER_LAYOUT_ALTERNATIVE
+					: (saved_layout == (int)PLAYER_LAYOUT_STUDIO)    ? PLAYER_LAYOUT_STUDIO
+																	 : PLAYER_LAYOUT_STANDARD;
+
+	int saved_accent_mode = (int)config_get_int("ambient", "accent_mode", -1);
+	if (saved_accent_mode < 0) {
+		// Default to Adaptive in Sonix Atelier Ambient Edition unless explicitly set false
+		const char *legacy = config_get("screen", "cover_accent", NULL);
+		adaptive_accent = legacy ? config_get_bool("screen", "cover_accent", true) : true;
+	} else {
+		adaptive_accent = (saved_accent_mode != 0);
+	}
+
+	lyrics_default_mode = config_get_int("lyrics", "default_mode", 0) == 1 ? PLAYER_LYRICS_FULLSCREEN
+																		   : PLAYER_LYRICS_INTEGRATED;
+	lyrics_remember_mode = config_get_bool("lyrics", "remember_mode", true);
+	lyrics_last_mode = config_get_int("lyrics", "last_mode", (int)lyrics_default_mode) == 1 ? PLAYER_LYRICS_FULLSCREEN
+																							: PLAYER_LYRICS_INTEGRATED;
+	int saved_lsize = (int)config_get_int("lyrics", "text_size", 1);
+	lyrics_text_size = (saved_lsize >= 0 && saved_lsize <= 2) ? (player_lyrics_text_size_t)saved_lsize
+															  : PLAYER_LYRICS_TEXT_MEDIUM;
+	lyrics_offset_ms = (int)config_get_int("lyrics", "offset_ms", 0);
+	if (lyrics_offset_ms < -LYRICS_OFFSET_LIMIT_MS) lyrics_offset_ms = -LYRICS_OFFSET_LIMIT_MS;
+	if (lyrics_offset_ms > LYRICS_OFFSET_LIMIT_MS) lyrics_offset_ms = LYRICS_OFFSET_LIMIT_MS;
+
+	playback_mode_t init_mode = playlist_get_mode();
+	shuffle_remembered = (init_mode == PLAYBACK_MODE_SHUFFLE || init_mode == PLAYBACK_MODE_SHUFFLE_REPEAT);
+
+	compute_geometry(cfg);
+	compute_target_palette(&pal_cur);
+	pal_target = pal_cur;
+
+	// Root sheet setup
+	sheet_width = screen_w;
+	lv_obj_remove_style_all(player_screen);
+	lv_obj_set_size(player_screen, screen_w, screen_h);
 	lv_obj_set_pos(player_screen, sheet_width, 0);
+	lv_obj_set_scrollable(player_screen, false);
 	lv_obj_set_hidden(player_screen, true);
 
+	// -----------------------------------------------------------------------
+	// 1. Minimal Navigation Header
+	// -----------------------------------------------------------------------
+	header_row = lv_obj_create(player_screen);
+	style_clean_box(header_row);
+	lv_obj_set_ignore_layout(header_row, true);
 
-	// Geometry first, because everything else hangs off it: the artwork is a
-	// square as wide as the screen, sitting flush at the top (this page hides
-	// the status bar), and the controls get whatever height is left. On a panel
-	// too short for that, the artwork gives up height rather than the controls.
-	int cover_size = (int)cfg->screen_width;
-	int menu_height = (int)cfg->screen_height - cover_size;
-	if (menu_height < PLAYER_MENU_MIN_HEIGHT) {
-		menu_height = PLAYER_MENU_MIN_HEIGHT;
-		cover_size = (int)cfg->screen_height - menu_height;
-		if (cover_size < 64)
-			cover_size = 64;
-	}
+	header_title_label = lv_label_create(header_row);
+	lv_label_set_text(header_title_label, tr("miniplayer_playing"));
+	lv_obj_set_style_text_font(header_title_label, &font_ui_16, 0);
+	lv_obj_set_style_text_letter_space(header_title_label, 1, 0);
+	lv_obj_center(header_title_label);
 
-	cover_box_w = cover_size;
-	cover_box_h = cover_size;
-	backdrop_w = (int)cfg->screen_width;
-	backdrop_h = menu_height;
-	backdrop_studio_h = (int)cfg->screen_height;
+	more_btn_obj = make_icon_btn(header_row, 44, 40, &icon_ellipsis_vertical, more_btn_event_cb, NULL, &more_btn_icon);
+	lv_obj_align(more_btn_obj, LV_ALIGN_RIGHT_MID, -15, 0);
+	lv_obj_set_ext_click_area(more_btn_obj, 12);
 
-	// The controls block. Its background is the current track's artwork,
-	// flipped and blurred (set per track in refresh_cover); the panel colour is
-	// what shows through when there is no artwork.
-	player_menu = lv_obj_create(player_screen);
-	lv_obj_set_size(player_menu, cfg->screen_width, menu_height);
-	lv_obj_align(player_menu, LV_ALIGN_BOTTOM_MID, 0, 0);
-	lv_obj_add_style(player_menu, &theme_style_panel, 0);
-	lv_obj_set_flex_flow(player_menu, LV_FLEX_FLOW_COLUMN);
-	lv_obj_set_flex_align(player_menu, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
-	lv_obj_set_style_border_width(player_menu, 0, 0);
-	lv_obj_set_style_radius(player_menu, 0, 0);
-	lv_obj_set_style_pad_hor(player_menu, cfg->padding, 0);
-	int spare = menu_height - PLAYER_MENU_REF_HEIGHT;
-	if (spare > 0) {
-		menu_pad_ver = PLAYER_MENU_PAD_VER + spare / 5;
-		menu_gap = PLAYER_MENU_GAP + spare / 5;
-	}
-	lv_obj_set_style_pad_ver(player_menu, menu_pad_ver, 0);
-	lv_obj_set_style_pad_gap(player_menu, menu_gap, 0);
-	lv_obj_set_scrollable(player_menu, false);
+	// -----------------------------------------------------------------------
+	// 2. Center Stage: 3-Slot Carousel & Mode A Integrated Lyrics
+	// -----------------------------------------------------------------------
+	stage_container = lv_obj_create(player_screen);
+	style_clean_box(stage_container);
+	lv_obj_set_ignore_layout(stage_container, true);
 
-	// Track info: the text on the left, the star and the format on the right.
-	lv_obj_t *song_info = lv_obj_create(player_menu);
-	lv_obj_set_size(song_info, lv_pct(100), LV_SIZE_CONTENT);
-	lv_obj_set_style_bg_opa(song_info, 0, 0);
-	lv_obj_set_style_border_width(song_info, 0, 0);
-	lv_obj_set_style_radius(song_info, 0, 0);
-	lv_obj_set_style_pad_all(song_info, 0, 0);
-	lv_obj_set_style_pad_column(song_info, 10, 0);
-	lv_obj_set_flex_flow(song_info, LV_FLEX_FLOW_ROW);
-	lv_obj_set_flex_align(song_info, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
-	lv_obj_set_scrollable(song_info, false);
-	// Every time the row is laid out (a new text size, the star shown or
-	// hidden, the row coming back from another arrangement) the title is lined
-	// up with the star again.
-	lv_obj_add_event_cb(song_info, song_info_layout_cb, LV_EVENT_LAYOUT_CHANGED, NULL);
+	carousel_stage = lv_obj_create(stage_container);
+	style_clean_box(carousel_stage);
+	lv_obj_set_size(carousel_stage, screen_w, stage_h);
+	lv_obj_set_pos(carousel_stage, 0, 0);
+	lv_obj_set_clickable(carousel_stage, true);
+	lv_obj_add_event_cb(carousel_stage, carousel_drag_cb, LV_EVENT_PRESSED, NULL);
+	lv_obj_add_event_cb(carousel_stage, carousel_drag_cb, LV_EVENT_PRESSING, NULL);
+	lv_obj_add_event_cb(carousel_stage, carousel_drag_cb, LV_EVENT_RELEASED, NULL);
+	lv_obj_add_event_cb(carousel_stage, carousel_drag_cb, LV_EVENT_PRESS_LOST, NULL);
 
-	lv_obj_t *song_text = lv_obj_create(song_info);
-	song_text_obj = song_text;
-	lv_obj_set_height(song_text, LV_SIZE_CONTENT);
-	lv_obj_set_flex_grow(song_text, 1);
-	lv_obj_set_style_bg_opa(song_text, 0, 0);
-	lv_obj_set_style_border_width(song_text, 0, 0);
-	lv_obj_set_style_pad_all(song_text, 0, 0);
-	lv_obj_set_flex_flow(song_text, LV_FLEX_FLOW_COLUMN);
-	lv_obj_set_scrollable(song_text, false);
+	// Create prev (0), next (2), then hero (1) last so hero stays visually on top
+	static const int CREATE_ORDER[3] = {0, 2, 1};
+	for (int k = 0; k < 3; k++) {
+		int idx = CREATE_ORDER[k];
+		carousel_slot_t *s = &cslots[idx];
+		int box = (idx == 1) ? hero_box : peek_box;
+		int rad = (idx == 1) ? 16 : 14;
 
-	// Long titles scroll rather than end in an ellipsis: on a 480 px panel a
-	// good half of real album titles do not fit, and the tail is usually the
-	// part that tells them apart.
-	song_title_label = lv_label_create(song_text);
-	lv_label_set_text(song_title_label, tr("player_no_track_loaded"));
-	lv_obj_set_width(song_title_label, lv_pct(100));
-	lv_obj_add_style(song_title_label, &theme_style_text, 0);
-	lv_obj_set_style_text_font(song_title_label, &font_ui_26, 0);
-	scrolltext_apply(song_title_label);
-
-	// The artist line -- see refresh_now_playing().
-	song_artist_label = lv_label_create(song_text);
-	lv_label_set_text(song_artist_label, "");
-	lv_obj_set_width(song_artist_label, lv_pct(100));
-	lv_obj_add_style(song_artist_label, &theme_style_text_dim, 0);
-	lv_obj_set_style_text_font(song_artist_label, &font_ui_24, 0);
-	scrolltext_apply(song_artist_label);
-
-	// Right side: the favourite star over the stream format.
-	lv_obj_t *song_side = lv_obj_create(song_info);
-	song_side_obj = song_side;
-	lv_obj_set_size(song_side, LV_SIZE_CONTENT, LV_SIZE_CONTENT);
-	lv_obj_set_style_bg_opa(song_side, 0, 0);
-	lv_obj_set_style_border_width(song_side, 0, 0);
-	lv_obj_set_style_pad_all(song_side, 0, 0);
-	lv_obj_set_style_pad_gap(song_side, 2, 0);
-	lv_obj_set_flex_flow(song_side, LV_FLEX_FLOW_COLUMN);
-	lv_obj_set_flex_align(song_side, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_END, LV_FLEX_ALIGN_CENTER);
-	lv_obj_set_scrollable(song_side, false);
-
-	lv_obj_t *fav_btn = lv_btn_create(song_side);
-	fav_btn_obj = fav_btn;
-	lv_obj_set_size(fav_btn, FAV_BTN_W, FAV_BTN_H);
-	lv_obj_set_style_bg_opa(fav_btn, LV_OPA_TRANSP, 0);
-	lv_obj_set_style_border_width(fav_btn, 0, 0);
-	lv_obj_set_style_shadow_width(fav_btn, 0, 0);
-	lv_obj_set_style_pad_all(fav_btn, 0, 0);
-	lv_obj_add_event_cb(fav_btn, fav_btn_event_cb, LV_EVENT_CLICKED, NULL);
-
-	fav_btn_icon = lv_image_create(fav_btn);
-	lv_obj_center(fav_btn_icon);
-	update_fav_button();
-
-	format_label = lv_label_create(song_side);
-	lv_label_set_text(format_label, "");
-	lv_obj_add_style(format_label, &theme_style_text_dim, 0);
-	lv_obj_set_style_text_font(format_label, &font_ui_18, 0);
-
-	// The shape of the track, and the slider laid over it that still does the
-	// seeking. Two things in the same place rather than one: drawing a
-	// waveform is one job and reading a drag is another, and the slider
-	// already knows how to do the second.
-	wave_box = lv_obj_create(player_menu);
-	lv_obj_remove_style_all(wave_box);
-	lv_obj_set_size(wave_box, lv_pct(100), WAVE_HEIGHT);
-	lv_obj_set_scrollable(wave_box, false);
-	lv_obj_set_hidden(wave_box, true);
-
-	{
-		wave_w = (int)cfg->screen_width - 2 * cfg->padding;
-		if (wave_w < WAVEFORM_BARS) {
-			wave_w = WAVEFORM_BARS;
+		s->frame = lv_obj_create(carousel_stage);
+		style_clean_box(s->frame);
+		lv_obj_set_ignore_layout(s->frame, true);
+		lv_obj_set_size(s->frame, box, box);
+		lv_obj_set_style_radius(s->frame, rad, 0);
+		lv_obj_set_style_clip_corner(s->frame, true, 0);
+		lv_obj_set_style_bg_opa(s->frame, LV_OPA_COVER, 0);
+		lv_obj_set_event_bubble(s->frame, true);
+		if (idx != 1) {
+			lv_obj_set_hidden(s->frame, true);
 		}
-		wave_buf = malloc((size_t)wave_w * WAVE_HEIGHT * 3);
-		if (wave_buf) {
-			memset(wave_buf, 0, (size_t)wave_w * WAVE_HEIGHT * 3);
-			wave_canvas = lv_canvas_create(wave_box);
-			lv_canvas_set_buffer(wave_canvas, wave_buf, wave_w, WAVE_HEIGHT, LV_COLOR_FORMAT_RGB565A8);
-			lv_obj_set_size(wave_canvas, wave_w, WAVE_HEIGHT);
-			lv_obj_align(wave_canvas, LV_ALIGN_CENTER, 0, 0);
-			lv_obj_set_clickable(wave_canvas, false);
-		} else {
-			fprintf(stderr, "player: no room for the waveform; the alternative layout keeps the bar\n");
-		}
+
+		s->placeholder = lv_image_create(s->frame);
+		lv_obj_set_clickable(s->placeholder, false);
+		lv_obj_set_event_bubble(s->placeholder, true);
+
+		s->img = lv_image_create(s->frame);
+		lv_obj_set_clickable(s->img, false);
+		lv_obj_set_event_bubble(s->img, true);
+		lv_obj_set_hidden(s->img, true);
 	}
+	refresh_cover_placeholders();
 
-	// Playback progress, drawn as described at PROGRESS_TRACK_HEIGHT.
-	progress_slider = lv_slider_create(player_menu);
-	lv_obj_set_width(progress_slider, lv_pct(100));
-	lv_obj_set_height(progress_slider, PROGRESS_TRACK_HEIGHT);
-	lv_slider_set_range(progress_slider, 0, 1000);
-
-	lv_obj_set_style_radius(progress_slider, LV_RADIUS_CIRCLE, LV_PART_MAIN);
-	lv_obj_set_style_bg_color(progress_slider, lv_color_make(255, 255, 255), LV_PART_MAIN);
-	lv_obj_set_style_bg_opa(progress_slider, LV_OPA_30, LV_PART_MAIN);
-
-	lv_obj_set_style_radius(progress_slider, LV_RADIUS_CIRCLE, LV_PART_INDICATOR);
-	lv_obj_set_style_bg_color(progress_slider, theme()->accent, LV_PART_INDICATOR);
-
-	lv_obj_set_style_radius(progress_slider, LV_RADIUS_CIRCLE, LV_PART_KNOB);
-	lv_obj_set_style_bg_color(progress_slider, theme()->accent, LV_PART_KNOB);
-	lv_obj_set_style_border_color(progress_slider, lv_color_white(), LV_PART_KNOB);
-	lv_obj_set_style_border_opa(progress_slider, LV_OPA_COVER, LV_PART_KNOB);
-	lv_obj_set_style_border_width(progress_slider, PROGRESS_KNOB_RING, LV_PART_KNOB);
-	lv_obj_set_style_pad_all(progress_slider, PROGRESS_KNOB_GROW, LV_PART_KNOB);
-	lv_obj_set_style_shadow_width(progress_slider, 8, LV_PART_KNOB);
-	lv_obj_set_style_shadow_opa(progress_slider, LV_OPA_40, LV_PART_KNOB);
-	lv_obj_set_style_shadow_color(progress_slider, lv_color_black(), LV_PART_KNOB);
-	lv_obj_set_style_shadow_offset_y(progress_slider, 1, LV_PART_KNOB);
-
-	lv_obj_add_event_cb(progress_slider, progress_slider_event_cb, LV_EVENT_ALL, NULL);
-
-	// Polls playback to keep the slider, the clock and the play/pause icon in
-	// sync. It runs from here on, slowing down rather than stopping when
-	// nothing is playing (see apply_playback_status).
-	smooth_timer = lv_timer_create(smooth_timer_cb, SMOOTH_PERIOD_MS, NULL);
-	lv_timer_pause(smooth_timer); // the poll starts it when something is playing
-
-	progress_slider_timer = lv_timer_create(progress_slider_timer_cb, POLL_PERIOD_IDLE_MS, NULL);
-	audio_set_completion_hook(track_end_hook);
-	// Slowed in standby, never stopped: this timer does more than paint --
-	// update_progress() calls device_state_take_completion(), the engine that
-	// advances the queue when a track ends on its own. Stopping it when the
-	// screen goes off (on the grounds that nobody can see the slider) meant no
-	// next track ever started with the screen dark, local files included,
-	// until the screen came back on and consumed the completion left waiting.
-	// The period is still apply_playback_status's to decide (fast while
-	// playing, slow when stopped), in the dark too.
-	power_slow_in_standby(progress_slider_timer, POLL_PERIOD_PLAYING_MS);
-
-	// The sleep timer's own tick. Slowed in standby and not stopped, because
-	// the screen being dark is the normal case for it -- and slowing it costs
-	// nothing in accuracy: the countdown is against the clock, so a late tick
-	// stops the music late by however late it was, not by a tick.
-	sleep_timer = lv_timer_create(sleep_timer_cb, 1000, NULL);
-	lv_timer_pause(sleep_timer); // apply_playback_status starts it when there is a stretch to count
-	power_slow_in_standby(sleep_timer, 5000);
-
-	lv_obj_t *below_slider_group = lv_obj_create(player_menu);
-	below_slider_obj = below_slider_group;
-	lv_obj_set_size(below_slider_group, lv_pct(100), LV_SIZE_CONTENT);
-	lv_obj_set_style_bg_opa(below_slider_group, 0, 0);
-	lv_obj_set_style_border_width(below_slider_group, 0, 0);
-	lv_obj_set_style_radius(below_slider_group, 0, 0);
-	lv_obj_set_style_pad_all(below_slider_group, 0, 0);
-	lv_obj_set_scrollable(below_slider_group, false);
-
-	// Elapsed and total time, tucked under the two ends of the bar.
-	elapsed_label = lv_label_create(below_slider_group);
-	lv_label_set_text(elapsed_label, "0:00");
-	lv_obj_add_style(elapsed_label, &theme_style_text, 0);
-	lv_obj_set_style_text_font(elapsed_label, &font_ui_22, 0);
-	lv_obj_set_align(elapsed_label, LV_ALIGN_LEFT_MID);
-
-	remaining_label = lv_label_create(below_slider_group);
-	lv_label_set_text(remaining_label, "0:00");
-	lv_obj_add_style(remaining_label, &theme_style_text, 0);
-	lv_obj_set_style_text_font(remaining_label, &font_ui_22, 0);
-	lv_obj_set_align(remaining_label, LV_ALIGN_RIGHT_MID);
-
-	// Between them, in the middle the two clocks left empty. Dimmer than they
-	// are: it is a bearing, not a reading.
-	queue_position_label = lv_label_create(below_slider_group);
-	lv_label_set_text(queue_position_label, "");
-	lv_obj_add_style(queue_position_label, &theme_style_text_dim, 0);
-	// A step below the clocks either side of it, as well as dimmer: it is a
-	// bearing and they are the reading, and at the same size the three read as
-	// one row of equals.
-	lv_obj_set_style_text_font(queue_position_label, &font_ui_18, 0);
-	lv_obj_set_align(queue_position_label, LV_ALIGN_CENTER);
-
-	// Transport: prev, play/pause, next -- with the repeat toggle parked on
-	// the left, out of the way of the transport controls.
-	lv_obj_t *player_controls_buttons = lv_obj_create(player_menu);
-	controls_row = player_controls_buttons;
-	lv_obj_set_size(player_controls_buttons, lv_pct(100), LV_SIZE_CONTENT);
-	lv_obj_set_style_bg_opa(player_controls_buttons, 0, 0);
-	lv_obj_set_style_border_width(player_controls_buttons, 0, 0);
-	lv_obj_set_style_radius(player_controls_buttons, 0, 0);
-	lv_obj_set_style_pad_all(player_controls_buttons, 0, 0);
-	lv_obj_set_flex_flow(player_controls_buttons, LV_FLEX_FLOW_ROW);
-	lv_obj_set_flex_align(player_controls_buttons, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
-	// Lifted a touch off the screen edge.
-	lv_obj_set_style_translate_y(player_controls_buttons, -8, 0);
-
-	// The repeat/shuffle button, kept out of the flex row so the transport
-	// stays centred on the screen.
-	lv_obj_t *repeat_btn = lv_btn_create(player_controls_buttons);
-	repeat_btn_obj = repeat_btn;
-	lv_obj_set_ignore_layout(repeat_btn, true);
-	lv_obj_set_size(repeat_btn, 56, 56);
-	lv_obj_set_style_bg_opa(repeat_btn, 0, 0);
-	lv_obj_set_style_shadow_width(repeat_btn, 0, 0);
-	lv_obj_add_event_cb(repeat_btn, repeat_btn_event_cb, LV_EVENT_CLICKED, NULL);
-	lv_obj_align(repeat_btn, LV_ALIGN_LEFT_MID, 0, 0);
-	// The glyph stays 56 px; the area that takes the tap does not, out to the
-	// height of the row and short of the previous button.
-	lv_obj_set_ext_click_area(repeat_btn, CORNER_BTN_EXT_CLICK);
-
-	repeat_btn_icon = lv_image_create(repeat_btn);
-	lv_obj_center(repeat_btn_icon);
-	update_repeat_button(); // the icon for the mode already in force
-
-	// The playback-speed gauge, in exactly the same corner: on a book the
-	// repeat mode is meaningless and the speed is the thing worth reaching,
-	// so one hides and the other appears in its place.
-	lv_obj_t *speed_btn = lv_btn_create(player_controls_buttons);
-	speed_btn_obj = speed_btn;
-	lv_obj_set_ignore_layout(speed_btn, true);
-	lv_obj_set_size(speed_btn, 56, 56);
-	lv_obj_set_style_bg_opa(speed_btn, 0, 0);
-	lv_obj_set_style_shadow_width(speed_btn, 0, 0);
-	lv_obj_add_event_cb(speed_btn, speed_btn_event_cb, LV_EVENT_CLICKED, NULL);
-	lv_obj_align(speed_btn, LV_ALIGN_LEFT_MID, 0, 0);
-	lv_obj_set_ext_click_area(speed_btn, CORNER_BTN_EXT_CLICK);
-	lv_obj_set_hidden(speed_btn, true);
-
-	speed_btn_icon = lv_image_create(speed_btn);
-	lv_image_set_src(speed_btn_icon, &icon_play_speed);
-	lv_obj_add_style(speed_btn_icon, &theme_style_icon, 0);
-	lv_obj_center(speed_btn_icon);
-	update_speed_button();
-
-	// The overflow menu, mirroring the repeat button on the right: queue and
-	// details in an iOS-style popover next to the button.
-	lv_obj_t *more_btn = lv_btn_create(player_controls_buttons);
-	more_btn_obj = more_btn;
-	lv_obj_set_ignore_layout(more_btn, true);
-	lv_obj_set_size(more_btn, 56, 56);
-	lv_obj_set_style_bg_opa(more_btn, 0, 0);
-	lv_obj_set_style_shadow_width(more_btn, 0, 0);
-	lv_obj_add_event_cb(more_btn, more_btn_event_cb, LV_EVENT_CLICKED, NULL);
-	lv_obj_align(more_btn, LV_ALIGN_RIGHT_MID, 0, 0);
-	lv_obj_set_ext_click_area(more_btn, CORNER_BTN_EXT_CLICK);
-
-	lv_obj_t *more_icon = lv_image_create(more_btn);
-	more_btn_icon = more_icon;
-	lv_image_set_src(more_icon, &icon_ellipsis_vertical);
-	lv_obj_add_style(more_icon, &theme_style_icon, 0);
-	lv_obj_set_style_image_recolor(more_icon, lv_color_make(150, 150, 150), 0);
-	lv_obj_set_style_image_recolor_opa(more_icon, LV_OPA_COVER, 0);
-	lv_obj_center(more_icon);
-
-	// No button chrome on prev/next: they sit on top of the blurred artwork,
-	// and plain glyphs read better there than filled boxes.
-	lv_obj_t *prev_btn = lv_btn_create(player_controls_buttons);
-	prev_btn_obj = prev_btn;
-	lv_obj_set_size(prev_btn, 76, 76);
-	lv_obj_set_style_bg_opa(prev_btn, 0, 0);
-	lv_obj_set_style_shadow_width(prev_btn, 0, 0);
-	prev_icon = lv_image_create(prev_btn);
-	lv_image_set_src(prev_icon, &icon_skip_back);
-	lv_obj_add_style(prev_icon, &theme_style_icon, 0);
-	lv_obj_center(prev_icon);
-
-	lv_obj_add_event_cb(prev_btn, prev_btn_event_cb, LV_EVENT_CLICKED, NULL);
-	lv_obj_set_style_opa(prev_btn, LV_OPA_40, LV_STATE_DISABLED); // see apply_connecting()
-
-	// Play/pause: a white disc, with the glyph carrying the colour.
-	play_btn = lv_btn_create(player_controls_buttons);
-	lv_obj_set_size(play_btn, 84, 84);
-	lv_obj_set_style_radius(play_btn, LV_RADIUS_CIRCLE, 0);
-	lv_obj_set_style_bg_color(play_btn, lv_color_white(), 0); // repainted by set_over_cover
-	lv_obj_set_style_bg_opa(play_btn, LV_OPA_COVER, 0);
-	lv_obj_set_style_shadow_width(play_btn, 0, 0);
-	lv_obj_add_event_cb(play_btn, play_btn_event_cb, LV_EVENT_CLICKED, NULL);
-	lv_obj_set_style_opa(play_btn, LV_OPA_40, LV_STATE_DISABLED);
-
-	play_btn_icon = lv_image_create(play_btn);
-	lv_obj_center(play_btn_icon);
-	apply_playback_status(AUDIO_STATUS_STOPPED); // start on the play glyph
-
-	lv_obj_t *next_btn = lv_btn_create(player_controls_buttons);
-	next_btn_obj = next_btn;
-	lv_obj_set_size(next_btn, 76, 76);
-	lv_obj_set_style_bg_opa(next_btn, 0, 0);
-	lv_obj_set_style_shadow_width(next_btn, 0, 0);
-	next_icon = lv_image_create(next_btn);
-	lv_image_set_src(next_icon, &icon_skip_forward);
-	lv_obj_add_style(next_icon, &theme_style_icon, 0);
-	lv_obj_center(next_icon);
-
-	lv_obj_add_event_cb(next_btn, next_btn_event_cb, LV_EVENT_CLICKED, NULL);
-	lv_obj_set_style_opa(next_btn, LV_OPA_40, LV_STATE_DISABLED);
-
-	// Album art: a square as wide as the screen, flush against the top edge
-	// (this page hides the status bar, see switch_screen). The picture is
-	// centre-cropped to fill it rather than letterboxed. Sizes were worked out
-	// at the top of this function, before the controls were laid out.
-	cover_panel = lv_obj_create(player_screen);
-	// Dragging the artwork to the right pushes the player back off screen.
-	player_sheet_attach_drag(cover_panel, false);
-	// Studio stretches the panel down over the top of the controls, where the
-	// taller shape of the track can reach: presses there go to the slider.
-	lv_obj_set_adv_hittest(cover_panel, true);
-	lv_obj_add_event_cb(cover_panel, cover_panel_hit_test_cb, LV_EVENT_HIT_TEST, NULL);
-	lv_obj_set_size(cover_panel, cover_size, cover_size);
-	lv_obj_align(cover_panel, LV_ALIGN_TOP_MID, 0, 0);
-	lv_obj_set_style_bg_color(cover_panel, theme()->cover_bg, 0);
-	lv_obj_set_style_border_width(cover_panel, 0, 0);
-	lv_obj_set_style_radius(cover_panel, 0, 0);
-	lv_obj_set_style_pad_all(cover_panel, 0, 0);
-	lv_obj_set_scrollable(cover_panel, false);
-
-	// The live badge, top right over the artwork: the one thing that has to be
-	// legible at a glance is that this is not a file being played but a
-	// broadcast going past. Red because that is what a live indicator is, and
-	// deliberately not the accent colour -- it says something about the
-	// stream, not about the theme.
-	live_badge = lv_label_create(cover_panel);
+	// Service badges inside hero frame
+	live_badge = lv_label_create(cslots[1].frame);
 	lv_label_set_text(live_badge, tr("player_live"));
-	lv_obj_set_style_text_font(live_badge, &font_ui_18, 0);
+	lv_obj_set_style_text_font(live_badge, &font_ui_14, 0);
 	lv_obj_set_style_text_color(live_badge, lv_color_white(), 0);
-	lv_obj_set_style_bg_color(live_badge, lv_color_make(224, 27, 36), 0); // Adwaita red
+	lv_obj_set_style_bg_color(live_badge, lv_color_make(224, 27, 36), 0);
 	lv_obj_set_style_bg_opa(live_badge, LV_OPA_COVER, 0);
 	lv_obj_set_style_radius(live_badge, 6, 0);
-	lv_obj_set_style_pad_hor(live_badge, 10, 0);
-	lv_obj_set_style_pad_ver(live_badge, 5, 0);
-	lv_obj_align(live_badge, LV_ALIGN_TOP_RIGHT, -BADGE_INSET, badge_top());
+	lv_obj_set_style_pad_hor(live_badge, 8, 0);
+	lv_obj_set_style_pad_ver(live_badge, 4, 0);
 	lv_obj_set_hidden(live_badge, true);
 
-	// The Qobuz mark, in the same corner and for the same reason: say where
-	// what is playing comes from. It is the white-outlined image, legible even
-	// over a black cover, and is not recoloured (theme_style_icon would turn
-	// it into a solid square).
-	qobuz_badge = lv_image_create(cover_panel);
+	qobuz_badge = lv_image_create(cslots[1].frame);
 	lv_image_set_src(qobuz_badge, &icon_qobuz_badge);
-	lv_obj_align(qobuz_badge, LV_ALIGN_TOP_RIGHT, -BADGE_INSET, badge_top());
 	lv_obj_set_hidden(qobuz_badge, true);
 
-	// Same corner, same size: the marks replace each other instead of sitting
-	// side by side, and update_qobuz_badge() decides which.
-	tidal_badge = lv_image_create(cover_panel);
+	tidal_badge = lv_image_create(cslots[1].frame);
 	lv_image_set_src(tidal_badge, &icon_tidal_badge);
-	lv_obj_align(tidal_badge, LV_ALIGN_TOP_RIGHT, -BADGE_INSET, badge_top());
 	lv_obj_set_hidden(tidal_badge, true);
 
-	// And the third, same corner and same size as the other two.
-	podcast_badge = lv_image_create(cover_panel);
+	podcast_badge = lv_image_create(cslots[1].frame);
 	lv_image_set_src(podcast_badge, &icon_podcast_badge);
-	lv_obj_align(podcast_badge, LV_ALIGN_TOP_RIGHT, -BADGE_INSET, badge_top());
 	lv_obj_set_hidden(podcast_badge, true);
 
-	// Shown while there is no artwork for the current track.
-	cover_placeholder_icon = lv_image_create(cover_panel);
-	lv_image_set_src(cover_placeholder_icon, &icon_music_note);
-	lv_obj_add_style(cover_placeholder_icon, &theme_style_text_dim, 0);
-	lv_obj_set_style_image_recolor(cover_placeholder_icon, theme()->text_secondary, 0);
-	lv_obj_set_style_image_recolor_opa(cover_placeholder_icon, LV_OPA_COVER, 0);
-	lv_obj_center(cover_placeholder_icon);
+	// Unobtrusive Drag Up-Next / Previous floating caption
+	drag_caption_pill = lv_obj_create(carousel_stage);
+	style_clean_box(drag_caption_pill);
+	lv_obj_set_size(drag_caption_pill, LV_SIZE_CONTENT, LV_SIZE_CONTENT);
+	lv_obj_set_style_max_width(drag_caption_pill, content_w - 20, 0);
+	lv_obj_set_style_radius(drag_caption_pill, LV_RADIUS_CIRCLE, 0);
+	lv_obj_set_style_bg_opa(drag_caption_pill, 224, 0);
+	lv_obj_set_style_border_width(drag_caption_pill, 1, 0);
+	lv_obj_set_style_border_opa(drag_caption_pill, LV_OPA_60, 0);
+	lv_obj_set_style_pad_hor(drag_caption_pill, 14, 0);
+	lv_obj_set_style_pad_ver(drag_caption_pill, 6, 0);
+	lv_obj_align(drag_caption_pill, LV_ALIGN_BOTTOM_MID, 0, -10);
+	lv_obj_set_hidden(drag_caption_pill, true);
 
-	// Where the title and the star go in the alternative layout: two pills in
-	// one bottom corner of the sleeve and a disc in the other. Built empty and
-	// hidden; apply_layout() moves the real labels into them.
-	//
-	// Children of cover_panel so they sit on the sleeve and travel with it.
-	// The column is what keeps the two pills stacked and both left-aligned
-	// while each is only as wide as its own words.
-	alt_text_col = lv_obj_create(cover_panel);
-	lv_obj_remove_style_all(alt_text_col);
-	lv_obj_set_size(alt_text_col, LV_SIZE_CONTENT, LV_SIZE_CONTENT);
-	lv_obj_align(alt_text_col, LV_ALIGN_BOTTOM_LEFT, ALT_PAD, -ALT_PAD);
-	lv_obj_set_flex_flow(alt_text_col, LV_FLEX_FLOW_COLUMN);
-	lv_obj_set_flex_align(alt_text_col, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_START);
-	lv_obj_set_style_pad_row(alt_text_col, 6, 0);
-	lv_obj_set_scrollable(alt_text_col, false);
-	lv_obj_set_hidden(alt_text_col, true);
-	// None of this takes presses. A plain object is clickable the moment it is
-	// made, and these lie on the artwork -- which is the surface the player is
-	// dragged shut by. Left clickable they swallowed every gesture that began
-	// on the title, so putting the player away by pushing it off the right of
-	// the screen worked everywhere except on the words naming the track.
-	lv_obj_set_clickable(alt_text_col, false);
+	drag_caption_label = lv_label_create(drag_caption_pill);
+	lv_label_set_text(drag_caption_label, "");
+	lv_label_set_long_mode(drag_caption_label, LV_LABEL_LONG_DOT);
+	lv_obj_set_style_max_width(drag_caption_label, content_w - 48, 0);
+	lv_obj_set_style_text_font(drag_caption_label, &font_ui_14, 0);
 
-	for (int i = 0; i < 2; i++) {
-		lv_obj_t *pill = lv_obj_create(alt_text_col);
-		lv_obj_remove_style_all(pill);
-		lv_obj_set_style_radius(pill, LV_RADIUS_CIRCLE, 0);
-		lv_obj_set_style_bg_opa(pill, LV_OPA_COVER, 0);
-		lv_obj_set_style_pad_hor(pill, ALT_PILL_PAD_H, 0);
-		lv_obj_set_style_pad_ver(pill, ALT_PILL_PAD_V, 0);
-		lv_obj_set_size(pill, LV_SIZE_CONTENT, LV_SIZE_CONTENT);
-		// No shadow. There was one, to keep a pill from disappearing into a
-		// patch of sleeve the same colour as itself -- but that was when the
-		// fill was the sleeve's colour at full strength. It is now a dark
-		// surface of fixed weight, which separates from artwork on its own, and
-		// the shadow under it only made the pill look pasted on.
-		lv_obj_set_scrollable(pill, false);
-		lv_obj_set_clickable(pill, false);
-		if (i == 0) {
-			alt_title_pill = pill;
-		} else {
-			alt_artist_pill = pill;
-		}
+	// Mode A: Integrated Lyrics Stage (same vertical bounds as artwork)
+	integrated_lyrics_box = lv_obj_create(stage_container);
+	style_clean_box(integrated_lyrics_box);
+	lv_obj_set_pos(integrated_lyrics_box, side_margin, 0);
+	lv_obj_set_size(integrated_lyrics_box, content_w, stage_h);
+	lv_obj_set_style_radius(integrated_lyrics_box, 16, 0);
+	lv_obj_set_style_bg_opa(integrated_lyrics_box, 115, 0);
+	lv_obj_set_style_border_width(integrated_lyrics_box, 1, 0);
+	lv_obj_set_style_border_opa(integrated_lyrics_box, LV_OPA_40, 0);
+	lv_obj_set_style_pad_hor(integrated_lyrics_box, 12, 0);
+	lv_obj_set_style_clip_corner(integrated_lyrics_box, true, 0);
+	lv_obj_set_hidden(integrated_lyrics_box, true);
+
+	int_lyrics_expand_btn =
+		make_icon_btn(integrated_lyrics_box, 38, 36, &icon_expand, lyrics_expand_cb, NULL, &int_lyrics_expand_icon);
+	lv_obj_align(int_lyrics_expand_btn, LV_ALIGN_TOP_RIGHT, 4, 4);
+	lv_obj_set_ext_click_area(int_lyrics_expand_btn, 8);
+
+	int_lyrics_search_btn = make_icon_btn(integrated_lyrics_box, 38, 36, &icon_lyrics_search, lyrics_find_btn_cb, NULL,
+										  &int_lyrics_search_icon);
+	lv_obj_align(int_lyrics_search_btn, LV_ALIGN_TOP_RIGHT, -38, 4);
+	lv_obj_set_ext_click_area(int_lyrics_search_btn, 6);
+
+	// Shared Lyrics Scroll Viewport + Empty State + Resume Sync Button
+	lyrics_view = lv_obj_create(integrated_lyrics_box);
+	lv_obj_remove_style_all(lyrics_view);
+	lv_obj_set_ignore_layout(lyrics_view, true);
+	lv_obj_set_flex_flow(lyrics_view, LV_FLEX_FLOW_COLUMN);
+	lv_obj_set_flex_align(lyrics_view, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
+	lv_obj_set_style_pad_hor(lyrics_view, 4, 0);
+	lv_obj_set_scroll_dir(lyrics_view, LV_DIR_VER);
+	lv_obj_set_scrollbar_mode(lyrics_view, LV_SCROLLBAR_MODE_OFF);
+	lv_obj_add_event_cb(lyrics_view, lyrics_scroll_cb, LV_EVENT_SCROLL_BEGIN, NULL);
+	lv_obj_add_event_cb(lyrics_view, lyrics_tap_cb, LV_EVENT_CLICKED, NULL);
+
+	lyrics_empty_box = lv_obj_create(integrated_lyrics_box);
+	style_clean_box(lyrics_empty_box);
+	lv_obj_set_size(lyrics_empty_box, content_w - 40, LV_SIZE_CONTENT);
+	lv_obj_set_flex_flow(lyrics_empty_box, LV_FLEX_FLOW_COLUMN);
+	lv_obj_set_flex_align(lyrics_empty_box, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
+	lv_obj_set_style_pad_row(lyrics_empty_box, 12, 0);
+	lv_obj_center(lyrics_empty_box);
+
+	lyrics_empty_icon = lv_image_create(lyrics_empty_box);
+	lv_image_set_src(lyrics_empty_icon, &icon_lyrics_empty);
+
+	lyrics_empty_label = lv_label_create(lyrics_empty_box);
+	lv_label_set_text(lyrics_empty_label, tr("lyrics_none"));
+	lv_label_set_long_mode(lyrics_empty_label, LV_LABEL_LONG_WRAP);
+	lv_obj_set_width(lyrics_empty_label, lv_pct(100));
+	lv_obj_set_style_text_align(lyrics_empty_label, LV_TEXT_ALIGN_CENTER, 0);
+	lv_obj_set_style_text_font(lyrics_empty_label, &font_ui_20, 0);
+
+	lyrics_empty_search_btn = lv_btn_create(lyrics_empty_box);
+	lv_obj_remove_style_all(lyrics_empty_search_btn);
+	lv_obj_set_size(lyrics_empty_search_btn, LV_SIZE_CONTENT, 40);
+	lv_obj_set_style_radius(lyrics_empty_search_btn, LV_RADIUS_CIRCLE, 0);
+	lv_obj_set_style_bg_opa(lyrics_empty_search_btn, LV_OPA_COVER, 0);
+	lv_obj_set_style_border_width(lyrics_empty_search_btn, 1, 0);
+	lv_obj_set_style_border_opa(lyrics_empty_search_btn, LV_OPA_COVER, 0);
+	lv_obj_set_style_pad_hor(lyrics_empty_search_btn, 18, 0);
+	lv_obj_set_style_opa(lyrics_empty_search_btn, LV_OPA_80, LV_STATE_PRESSED);
+	lv_obj_add_event_cb(lyrics_empty_search_btn, lyrics_find_btn_cb, LV_EVENT_CLICKED, NULL);
+
+	lyrics_empty_search_label = lv_label_create(lyrics_empty_search_btn);
+	lv_label_set_text(lyrics_empty_search_label, tr("lyrics_download"));
+	lv_obj_set_style_text_font(lyrics_empty_search_label, &font_ui_16, 0);
+	lv_obj_center(lyrics_empty_search_label);
+
+	resume_sync_btn = lv_btn_create(integrated_lyrics_box);
+	lv_obj_remove_style_all(resume_sync_btn);
+	lv_obj_set_ignore_layout(resume_sync_btn, true);
+	lv_obj_set_size(resume_sync_btn, LV_SIZE_CONTENT, 36);
+	lv_obj_set_style_radius(resume_sync_btn, LV_RADIUS_CIRCLE, 0);
+	lv_obj_set_style_bg_opa(resume_sync_btn, 236, 0);
+	lv_obj_set_style_border_width(resume_sync_btn, 1, 0);
+	lv_obj_set_style_border_opa(resume_sync_btn, LV_OPA_80, 0);
+	lv_obj_set_style_pad_hor(resume_sync_btn, 16, 0);
+	lv_obj_align(resume_sync_btn, LV_ALIGN_BOTTOM_MID, 0, -12);
+	lv_obj_add_event_cb(resume_sync_btn, resume_sync_btn_cb, LV_EVENT_CLICKED, NULL);
+	lv_obj_set_hidden(resume_sync_btn, true);
+
+	resume_sync_label = lv_label_create(resume_sync_btn);
+	lv_label_set_text(resume_sync_label, tr("lyrics_resume_sync"));
+	lv_obj_set_style_text_font(resume_sync_label, &font_ui_14, 0);
+	lv_obj_center(resume_sync_label);
+
+	// -----------------------------------------------------------------------
+	// 3. Left-Aligned Editorial Track Info + Right Favorite Button
+	// -----------------------------------------------------------------------
+	track_info_row = lv_obj_create(player_screen);
+	style_clean_box(track_info_row);
+	lv_obj_set_ignore_layout(track_info_row, true);
+	lv_obj_set_flex_flow(track_info_row, LV_FLEX_FLOW_ROW);
+	lv_obj_set_flex_align(track_info_row, LV_FLEX_ALIGN_SPACE_BETWEEN, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
+	lv_obj_set_style_pad_column(track_info_row, 12, 0);
+
+	lv_obj_t *text_col = lv_obj_create(track_info_row);
+	style_clean_box(text_col);
+	lv_obj_set_flex_grow(text_col, 1);
+	lv_obj_set_height(text_col, LV_SIZE_CONTENT);
+	lv_obj_set_flex_flow(text_col, LV_FLEX_FLOW_COLUMN);
+	lv_obj_set_flex_align(text_col, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_START);
+	lv_obj_set_style_pad_row(text_col, 3, 0);
+
+	song_title_label = lv_label_create(text_col);
+	lv_label_set_text(song_title_label, tr("player_no_track_loaded"));
+	lv_obj_set_width(song_title_label, lv_pct(100));
+	lv_obj_set_style_text_font(song_title_label, is_tall_panel ? &font_ui_28_bold : &font_ui_24_bold, 0);
+	scrolltext_apply(song_title_label);
+
+	song_artist_label = lv_label_create(text_col);
+	lv_label_set_text(song_artist_label, "");
+	lv_obj_set_width(song_artist_label, lv_pct(100));
+	lv_obj_set_style_text_font(song_artist_label, &font_ui_20, 0);
+	scrolltext_apply(song_artist_label);
+
+	fav_btn_obj = make_icon_btn(track_info_row, 44, 44, &icon_star, fav_btn_event_cb, NULL, &fav_btn_icon);
+	lv_obj_set_ext_click_area(fav_btn_obj, 8);
+
+	// -----------------------------------------------------------------------
+	// 4. Minimalist 72-Bar Audio Waveform + Timestamps & Real Audio Metadata
+	// -----------------------------------------------------------------------
+	wave_section = lv_obj_create(player_screen);
+	style_clean_box(wave_section);
+	lv_obj_set_ignore_layout(wave_section, true);
+	lv_obj_set_flex_flow(wave_section, LV_FLEX_FLOW_COLUMN);
+	lv_obj_set_flex_align(wave_section, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
+	lv_obj_set_style_pad_row(wave_section, 6, 0);
+
+	wave_box = lv_obj_create(wave_section);
+	style_clean_box(wave_box);
+	lv_obj_set_size(wave_box, lv_pct(100), wave_h);
+
+	wave_w = content_w;
+	wave_buf = malloc((size_t)wave_w * (size_t)wave_h * 3);
+	if (wave_buf) {
+		memset(wave_buf, 0, (size_t)wave_w * (size_t)wave_h * 3);
+		wave_canvas = lv_canvas_create(wave_box);
+		lv_canvas_set_buffer(wave_canvas, wave_buf, wave_w, wave_h, LV_COLOR_FORMAT_RGB565A8);
+		lv_obj_set_size(wave_canvas, wave_w, wave_h);
+		lv_obj_align(wave_canvas, LV_ALIGN_CENTER, 0, 0);
+		lv_obj_set_clickable(wave_canvas, false);
+		lv_obj_set_hidden(wave_canvas, true);
 	}
 
-	alt_fav_circle = lv_obj_create(cover_panel);
-	lv_obj_remove_style_all(alt_fav_circle);
-	lv_obj_set_size(alt_fav_circle, ALT_FAV_SIZE, ALT_FAV_SIZE);
-	lv_obj_set_style_radius(alt_fav_circle, LV_RADIUS_CIRCLE, 0);
-	lv_obj_set_style_bg_opa(alt_fav_circle, LV_OPA_COVER, 0);
-	lv_obj_align(alt_fav_circle, LV_ALIGN_BOTTOM_RIGHT, -ALT_PAD, -ALT_PAD);
-	lv_obj_set_scrollable(alt_fav_circle, false);
-	// Likewise: the star's own button is a child of this and takes its own
-	// presses, so the disc around it has no reason to take any.
-	lv_obj_set_clickable(alt_fav_circle, false);
-	lv_obj_set_hidden(alt_fav_circle, true);
+	progress_slider = lv_slider_create(wave_box);
+	lv_obj_set_size(progress_slider, lv_pct(100), 4);
+	lv_obj_align(progress_slider, LV_ALIGN_CENTER, 0, 0);
+	lv_slider_set_range(progress_slider, 0, 1000);
+	lv_obj_set_ext_click_area(progress_slider, 12);
+	lv_obj_set_style_radius(progress_slider, LV_RADIUS_CIRCLE, LV_PART_MAIN);
+	lv_obj_set_style_radius(progress_slider, LV_RADIUS_CIRCLE, LV_PART_INDICATOR);
+	lv_obj_set_style_radius(progress_slider, LV_RADIUS_CIRCLE, LV_PART_KNOB);
+	lv_obj_set_style_pad_all(progress_slider, 4, LV_PART_KNOB);
+	lv_obj_set_style_border_width(progress_slider, 0, LV_PART_KNOB);
+	lv_obj_set_style_shadow_width(progress_slider, 0, LV_PART_KNOB);
+	lv_obj_add_event_cb(progress_slider, seek_slider_event_cb, LV_EVENT_ALL, NULL);
 
-	cover_img = lv_image_create(cover_panel);
-	lv_obj_center(cover_img);
-	lv_obj_set_hidden(cover_img, true);
+	meta_clocks_row = lv_obj_create(wave_section);
+	style_clean_box(meta_clocks_row);
+	lv_obj_set_size(meta_clocks_row, lv_pct(100), 20);
 
-	// ---------------------------------------------------------------------
-	// Studio: the blurred sleeve behind the whole screen, and everything else
-	// laid out over it.
-	//
-	// The background is a child of the page rather than of the artwork, so it
-	// reaches under the controls as well; the panel that carries the rest is a
-	// child of the artwork, so it travels with the sheet. Nothing on either
-	// takes a press: the surface under them is what the player is pushed shut
-	// by, and the buttons that do take presses are moved here from elsewhere.
-	// ---------------------------------------------------------------------
-	studio_bg = lv_image_create(player_screen);
-	lv_obj_set_ignore_layout(studio_bg, true);
-	lv_obj_set_size(studio_bg, cfg->screen_width, cfg->screen_height);
-	lv_obj_set_pos(studio_bg, 0, 0);
-	// COVER and not STRETCH: the blurred copy is asked for at the shape of the
-	// screen, but between a change of arrangement and the picture that follows
-	// it the one on hand is still the old shape, and stretching that is a
-	// visibly squashed sleeve.
-	lv_image_set_inner_align(studio_bg, LV_IMAGE_ALIGN_COVER);
-	lv_obj_set_clickable(studio_bg, false);
-	lv_obj_set_hidden(studio_bg, true);
-	lv_obj_move_background(studio_bg);
+	elapsed_label = lv_label_create(meta_clocks_row);
+	lv_label_set_text(elapsed_label, "0:00");
+	lv_obj_set_style_text_font(elapsed_label, &font_ui_14, 0);
+	lv_obj_align(elapsed_label, LV_ALIGN_LEFT_MID, 0, 0);
 
-	studio_box_w = cover_size;
-	studio_box_h = (int)cfg->screen_height - STUDIO_CONTROLS_H - 2 * (menu_gap - PLAYER_MENU_GAP);
-	if (studio_box_h < cover_size) {
-		studio_box_h = cover_size;
-	}
-	studio_box = lv_obj_create(cover_panel);
-	lv_obj_remove_style_all(studio_box);
-	lv_obj_set_size(studio_box, studio_box_w, studio_box_h);
-	lv_obj_set_pos(studio_box, 0, 0);
-	lv_obj_set_scrollable(studio_box, false);
-	lv_obj_set_clickable(studio_box, false);
-	lv_obj_set_hidden(studio_box, true);
+	format_label = lv_label_create(meta_clocks_row);
+	lv_label_set_text(format_label, "");
+	lv_obj_set_style_text_font(format_label, &font_ui_14, 0);
+	lv_obj_align(format_label, LV_ALIGN_CENTER, 0, 0);
+	lv_obj_set_hidden(format_label, true);
 
-	studio_head = lv_obj_create(studio_box);
-	lv_obj_remove_style_all(studio_head);
-	lv_obj_set_size(studio_head, cover_size - 2 * STUDIO_MARGIN, STUDIO_HEAD_H);
-	lv_obj_set_scrollable(studio_head, false);
-	lv_obj_set_clickable(studio_head, false);
+	remaining_label = lv_label_create(meta_clocks_row);
+	lv_label_set_text(remaining_label, "0:00");
+	lv_obj_set_style_text_font(remaining_label, &font_ui_14, 0);
+	lv_obj_align(remaining_label, LV_ALIGN_RIGHT_MID, 0, 0);
 
-	// Centred in the head and not filling it: the ellipsis sits at the right
-	// edge and the chevron at the left, and the two names have to stop before
-	// they reach either -- on both sides, or a long title would be centred
-	// against one of them.
-	studio_text_col = lv_obj_create(studio_head);
-	lv_obj_remove_style_all(studio_text_col);
-	lv_obj_set_size(studio_text_col, cover_size - 2 * STUDIO_MARGIN - 2 * 68, LV_SIZE_CONTENT);
-	lv_obj_align(studio_text_col, LV_ALIGN_CENTER, 0, 0);
-	lv_obj_set_flex_flow(studio_text_col, LV_FLEX_FLOW_COLUMN);
-	lv_obj_set_flex_align(studio_text_col, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
-	lv_obj_set_style_pad_row(studio_text_col, 4, 0);
-	lv_obj_set_style_text_align(studio_text_col, LV_TEXT_ALIGN_CENTER, 0);
-	lv_obj_set_scrollable(studio_text_col, false);
-	lv_obj_set_clickable(studio_text_col, false);
+	// -----------------------------------------------------------------------
+	// 5. Minimal 5-Control Horizontal Transport
+	//    Shuffle — Previous — Play/Pause — Next — Repeat
+	// -----------------------------------------------------------------------
+	controls_row = lv_obj_create(player_screen);
+	style_clean_box(controls_row);
+	lv_obj_set_ignore_layout(controls_row, true);
 
-	// The sleeve at whatever size studio_place() settles on. The picture is
-	// decoded at the width of the screen for the standard arrangement, so it is
-	// scaled down here rather than decoded twice.
-	studio_cover = lv_image_create(studio_box);
-	lv_obj_set_ignore_layout(studio_cover, true);
-	lv_image_set_inner_align(studio_cover, LV_IMAGE_ALIGN_STRETCH);
-	lv_obj_set_clickable(studio_cover, false);
+	int play_dia = is_tall_panel ? 72 : 66;
+	int skip_dia = 54;
+	int mode_dia = 46;
 
-	// What stands in the sleeve's place when the track has no artwork: the same
-	// surface and the same mark the full-width cover panel uses, at the size
-	// this arrangement gives the sleeve.
-	studio_empty = lv_obj_create(studio_box);
-	lv_obj_set_ignore_layout(studio_empty, true);
-	lv_obj_add_style(studio_empty, &theme_style_panel, 0);
-	lv_obj_set_style_border_width(studio_empty, 0, 0);
-	lv_obj_set_style_radius(studio_empty, 8, 0);
-	lv_obj_set_scrollable(studio_empty, false);
-	lv_obj_set_clickable(studio_empty, false);
-	lv_obj_set_hidden(studio_empty, true);
+	shuffle_btn_obj =
+		make_icon_btn(controls_row, mode_dia, mode_dia, &icon_shuffle, shuffle_btn_event_cb, NULL, &shuffle_btn_icon);
+	lv_obj_align(shuffle_btn_obj, LV_ALIGN_LEFT_MID, 0, 0);
+	lv_obj_set_ext_click_area(shuffle_btn_obj, 8);
+	shuffle_dot = lv_obj_create(shuffle_btn_obj);
+	style_clean_box(shuffle_dot);
+	lv_obj_set_size(shuffle_dot, 5, 5);
+	lv_obj_set_style_radius(shuffle_dot, LV_RADIUS_CIRCLE, 0);
+	lv_obj_set_style_bg_opa(shuffle_dot, LV_OPA_COVER, 0);
+	lv_obj_align(shuffle_dot, LV_ALIGN_BOTTOM_MID, 0, -2);
+	lv_obj_set_hidden(shuffle_dot, true);
 
-	studio_empty_icon = lv_image_create(studio_empty);
-	lv_obj_set_style_image_recolor_opa(studio_empty_icon, LV_OPA_COVER, 0);
-	lv_obj_center(studio_empty_icon);
-	lv_obj_set_clickable(studio_empty_icon, false);
+	prev_btn_obj = make_icon_btn(controls_row, skip_dia, skip_dia, &icon_skip_back, prev_btn_event_cb, NULL, &prev_icon);
+	lv_obj_align(prev_btn_obj, LV_ALIGN_CENTER, -(play_dia / 2 + 24 + skip_dia / 2), 0);
+	lv_obj_set_ext_click_area(prev_btn_obj, 6);
 
-	studio_quality = lv_obj_create(studio_box);
-	lv_obj_remove_style_all(studio_quality);
-	lv_obj_set_flex_flow(studio_quality, LV_FLEX_FLOW_ROW);
-	lv_obj_set_flex_align(studio_quality, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
-	lv_obj_set_style_pad_column(studio_quality, 8, 0);
-	lv_obj_set_scrollable(studio_quality, false);
-	lv_obj_set_clickable(studio_quality, false);
+	play_btn = lv_btn_create(controls_row);
+	lv_obj_remove_style_all(play_btn);
+	lv_obj_set_size(play_btn, play_dia, play_dia);
+	lv_obj_align(play_btn, LV_ALIGN_CENTER, 0, 0);
+	lv_obj_set_style_radius(play_btn, LV_RADIUS_CIRCLE, 0);
+	lv_obj_set_style_bg_opa(play_btn, LV_OPA_COVER, 0);
+	lv_obj_set_style_opa(play_btn, LV_OPA_40, LV_STATE_DISABLED);
+	lv_obj_add_event_cb(play_btn, play_btn_event_cb, LV_EVENT_CLICKED, NULL);
+	play_btn_icon = lv_image_create(play_btn);
+	lv_image_set_src(play_btn_icon, &icon_play);
+	lv_obj_center(play_btn_icon);
+	lv_obj_set_clickable(play_btn_icon, false);
+	lv_obj_set_event_bubble(play_btn_icon, true);
 
-	// No theme_style_icon here: the four quality marks carry their own colours,
-	// which is how the track lists draw them, and a recolour to the text colour
-	// flattens all four into the same grey glyph.
-	studio_quality_icon = lv_image_create(studio_quality);
+	next_btn_obj =
+		make_icon_btn(controls_row, skip_dia, skip_dia, &icon_skip_forward, next_btn_event_cb, NULL, &next_icon);
+	lv_obj_align(next_btn_obj, LV_ALIGN_CENTER, (play_dia / 2 + 24 + skip_dia / 2), 0);
+	lv_obj_set_ext_click_area(next_btn_obj, 6);
 
-	lyrics_build();
+	repeat_btn_obj =
+		make_icon_btn(controls_row, mode_dia, mode_dia, &icon_repeat_all, repeat_btn_event_cb, NULL, &repeat_btn_icon);
+	lv_obj_align(repeat_btn_obj, LV_ALIGN_RIGHT_MID, 0, 0);
+	lv_obj_set_ext_click_area(repeat_btn_obj, 8);
+	repeat_dot = lv_obj_create(repeat_btn_obj);
+	style_clean_box(repeat_dot);
+	lv_obj_set_size(repeat_dot, 5, 5);
+	lv_obj_set_style_radius(repeat_dot, LV_RADIUS_CIRCLE, 0);
+	lv_obj_set_style_bg_opa(repeat_dot, LV_OPA_COVER, 0);
+	lv_obj_align(repeat_dot, LV_ALIGN_BOTTOM_MID, 0, -2);
+	lv_obj_set_hidden(repeat_dot, true);
 
-	// Last, so it is above the artwork: an invisible strip exactly where the
-	// status bar would be, owning the pull-down that opens the control centre.
+	speed_btn_obj =
+		make_icon_btn(controls_row, mode_dia, mode_dia, &icon_play_speed, speed_btn_event_cb, NULL, &speed_btn_icon);
+	lv_obj_align(speed_btn_obj, LV_ALIGN_RIGHT_MID, 0, 0);
+	lv_obj_set_ext_click_area(speed_btn_obj, 8);
+	lv_obj_set_hidden(speed_btn_obj, true);
+
+	// -----------------------------------------------------------------------
+	// 6. Bottom Shortcuts Row: One-Tap Lyrics · Subtle Up Next · Queue
+	// -----------------------------------------------------------------------
+	shortcuts_row = lv_obj_create(player_screen);
+	style_clean_box(shortcuts_row);
+	lv_obj_set_ignore_layout(shortcuts_row, true);
+
+	lyrics_shortcut_btn = lv_btn_create(shortcuts_row);
+	lv_obj_remove_style_all(lyrics_shortcut_btn);
+	lv_obj_set_size(lyrics_shortcut_btn, LV_SIZE_CONTENT, 36);
+	lv_obj_align(lyrics_shortcut_btn, LV_ALIGN_LEFT_MID, 0, 0);
+	lv_obj_set_style_radius(lyrics_shortcut_btn, LV_RADIUS_CIRCLE, 0);
+	lv_obj_set_style_pad_hor(lyrics_shortcut_btn, 12, 0);
+	lv_obj_set_style_pad_column(lyrics_shortcut_btn, 7, 0);
+	lv_obj_set_flex_flow(lyrics_shortcut_btn, LV_FLEX_FLOW_ROW);
+	lv_obj_set_flex_align(lyrics_shortcut_btn, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
+	lv_obj_set_style_bg_color(lyrics_shortcut_btn, lv_color_white(), LV_STATE_PRESSED);
+	lv_obj_set_style_bg_opa(lyrics_shortcut_btn, LV_OPA_10, LV_STATE_PRESSED);
+	lv_obj_set_ext_click_area(lyrics_shortcut_btn, 8);
+	lv_obj_add_event_cb(lyrics_shortcut_btn, lyrics_shortcut_cb, LV_EVENT_CLICKED, NULL);
+
+	lyrics_shortcut_icon = lv_image_create(lyrics_shortcut_btn);
+	lv_image_set_src(lyrics_shortcut_icon, &icon_lyrics);
+	lv_obj_set_clickable(lyrics_shortcut_icon, false);
+	lv_obj_set_event_bubble(lyrics_shortcut_icon, true);
+
+	lyrics_shortcut_label = lv_label_create(lyrics_shortcut_btn);
+	lv_label_set_text(lyrics_shortcut_label, tr("lyrics"));
+	lv_obj_set_style_text_font(lyrics_shortcut_label, &font_ui_14, 0);
+	lv_obj_set_clickable(lyrics_shortcut_label, false);
+	lv_obj_set_event_bubble(lyrics_shortcut_label, true);
+
+	upnext_bearing_btn = lv_btn_create(shortcuts_row);
+	lv_obj_remove_style_all(upnext_bearing_btn);
+	lv_obj_set_size(upnext_bearing_btn, 212, 34);
+	lv_obj_align(upnext_bearing_btn, LV_ALIGN_CENTER, 0, 0);
+	lv_obj_add_event_cb(upnext_bearing_btn, open_queue_btn_cb, LV_EVENT_CLICKED, NULL);
+	lv_obj_set_hidden(upnext_bearing_btn, true);
+
+	upnext_bearing_label = lv_label_create(upnext_bearing_btn);
+	lv_label_set_text(upnext_bearing_label, "");
+	lv_label_set_long_mode(upnext_bearing_label, LV_LABEL_LONG_DOT);
+	lv_obj_set_width(upnext_bearing_label, 208);
+	lv_obj_set_height(upnext_bearing_label, lv_font_get_line_height(&font_ui_14));
+	lv_obj_set_style_text_align(upnext_bearing_label, LV_TEXT_ALIGN_CENTER, 0);
+	lv_obj_set_style_text_font(upnext_bearing_label, &font_ui_14, 0);
+	lv_obj_center(upnext_bearing_label);
+	lv_obj_set_clickable(upnext_bearing_label, false);
+	lv_obj_set_event_bubble(upnext_bearing_label, true);
+
+	queue_shortcut_btn = lv_btn_create(shortcuts_row);
+	lv_obj_remove_style_all(queue_shortcut_btn);
+	lv_obj_set_size(queue_shortcut_btn, LV_SIZE_CONTENT, 36);
+	lv_obj_align(queue_shortcut_btn, LV_ALIGN_RIGHT_MID, 0, 0);
+	lv_obj_set_style_radius(queue_shortcut_btn, LV_RADIUS_CIRCLE, 0);
+	lv_obj_set_style_pad_hor(queue_shortcut_btn, 12, 0);
+	lv_obj_set_style_pad_column(queue_shortcut_btn, 7, 0);
+	lv_obj_set_flex_flow(queue_shortcut_btn, LV_FLEX_FLOW_ROW);
+	lv_obj_set_flex_align(queue_shortcut_btn, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
+	lv_obj_set_style_bg_color(queue_shortcut_btn, lv_color_white(), LV_STATE_PRESSED);
+	lv_obj_set_style_bg_opa(queue_shortcut_btn, LV_OPA_10, LV_STATE_PRESSED);
+	lv_obj_set_ext_click_area(queue_shortcut_btn, 8);
+	lv_obj_add_event_cb(queue_shortcut_btn, open_queue_btn_cb, LV_EVENT_CLICKED, NULL);
+
+	queue_shortcut_label = lv_label_create(queue_shortcut_btn);
+	lv_label_set_text(queue_shortcut_label, tr("queue"));
+	lv_obj_set_style_text_font(queue_shortcut_label, &font_ui_14, 0);
+	lv_obj_set_clickable(queue_shortcut_label, false);
+	lv_obj_set_event_bubble(queue_shortcut_label, true);
+
+	queue_shortcut_icon = lv_image_create(queue_shortcut_btn);
+	lv_image_set_src(queue_shortcut_icon, &icon_queue_small);
+	lv_obj_set_clickable(queue_shortcut_icon, false);
+	lv_obj_set_event_bubble(queue_shortcut_icon, true);
+
+	// -----------------------------------------------------------------------
+	// 7. Mode B: Immersive Full-Screen Lyrics Overlay
+	// -----------------------------------------------------------------------
+	fullscreen_lyrics_box = lv_obj_create(player_screen);
+	style_clean_box(fullscreen_lyrics_box);
+	lv_obj_set_ignore_layout(fullscreen_lyrics_box, true);
+	lv_obj_set_pos(fullscreen_lyrics_box, 0, 0);
+	lv_obj_set_size(fullscreen_lyrics_box, screen_w, screen_h);
+	lv_obj_set_clickable(fullscreen_lyrics_box, true);
+	lv_obj_set_hidden(fullscreen_lyrics_box, true);
+
+	fs_header_row = lv_obj_create(fullscreen_lyrics_box);
+	style_clean_box(fs_header_row);
+	lv_obj_set_ignore_layout(fs_header_row, true);
+	lv_obj_set_flex_flow(fs_header_row, LV_FLEX_FLOW_ROW);
+	lv_obj_set_flex_align(fs_header_row, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
+	lv_obj_set_style_pad_column(fs_header_row, 10, 0);
+
+	// Tapping the 44x44 thumbnail returns straight to Artwork mode
+	fs_thumb_box = lv_btn_create(fs_header_row);
+	lv_obj_remove_style_all(fs_thumb_box);
+	lv_obj_set_size(fs_thumb_box, 44, 44);
+	lv_obj_set_style_radius(fs_thumb_box, 8, 0);
+	lv_obj_set_style_bg_opa(fs_thumb_box, LV_OPA_COVER, 0);
+	lv_obj_set_style_clip_corner(fs_thumb_box, true, 0);
+	lv_obj_add_event_cb(fs_thumb_box, fs_return_to_artwork_cb, LV_EVENT_CLICKED, NULL);
+
+	fs_thumb_fallback = lv_image_create(fs_thumb_box);
+	lv_image_set_src(fs_thumb_fallback, &icon_music2);
+	lv_obj_set_style_image_recolor_opa(fs_thumb_fallback, LV_OPA_COVER, 0);
+	lv_obj_center(fs_thumb_fallback);
+	lv_obj_set_clickable(fs_thumb_fallback, false);
+	lv_obj_set_event_bubble(fs_thumb_fallback, true);
+
+	fs_thumb_img = lv_image_create(fs_thumb_box);
+	lv_obj_set_size(fs_thumb_img, 44, 44);
+	lv_obj_center(fs_thumb_img);
+	lv_obj_set_clickable(fs_thumb_img, false);
+	lv_obj_set_event_bubble(fs_thumb_img, true);
+	lv_obj_set_hidden(fs_thumb_img, true);
+
+	lv_obj_t *fs_meta_col = lv_obj_create(fs_header_row);
+	style_clean_box(fs_meta_col);
+	lv_obj_set_flex_grow(fs_meta_col, 1);
+	lv_obj_set_height(fs_meta_col, LV_SIZE_CONTENT);
+	lv_obj_set_flex_flow(fs_meta_col, LV_FLEX_FLOW_COLUMN);
+	lv_obj_set_style_pad_row(fs_meta_col, 1, 0);
+
+	fs_title_label = lv_label_create(fs_meta_col);
+	lv_label_set_text(fs_title_label, "");
+	lv_label_set_long_mode(fs_title_label, LV_LABEL_LONG_DOT);
+	lv_obj_set_width(fs_title_label, lv_pct(100));
+	lv_obj_set_height(fs_title_label, lv_font_get_line_height(&font_ui_20_bold));
+	lv_obj_set_style_text_font(fs_title_label, &font_ui_20_bold, 0);
+
+	fs_artist_label = lv_label_create(fs_meta_col);
+	lv_label_set_text(fs_artist_label, "");
+	lv_label_set_long_mode(fs_artist_label, LV_LABEL_LONG_DOT);
+	lv_obj_set_width(fs_artist_label, lv_pct(100));
+	lv_obj_set_height(fs_artist_label, lv_font_get_line_height(&font_ui_14));
+	lv_obj_set_style_text_font(fs_artist_label, &font_ui_14, 0);
+
+	fs_size_btn = make_icon_btn(fs_header_row, 38, 38, &icon_lyrics_aa, fs_size_cycle_cb, NULL, &fs_size_icon);
+	lv_obj_set_ext_click_area(fs_size_btn, 4);
+
+	fs_offset_toggle_btn = lv_btn_create(fs_header_row);
+	lv_obj_remove_style_all(fs_offset_toggle_btn);
+	lv_obj_set_size(fs_offset_toggle_btn, 38, 38);
+	lv_obj_set_style_radius(fs_offset_toggle_btn, LV_RADIUS_CIRCLE, 0);
+	lv_obj_set_style_bg_color(fs_offset_toggle_btn, lv_color_white(), LV_STATE_PRESSED);
+	lv_obj_set_style_bg_opa(fs_offset_toggle_btn, LV_OPA_10, LV_STATE_PRESSED);
+	lv_obj_add_event_cb(fs_offset_toggle_btn, fs_offset_toggle_cb, LV_EVENT_CLICKED, NULL);
+	fs_offset_toggle_label = lv_label_create(fs_offset_toggle_btn);
+	lv_label_set_text(fs_offset_toggle_label, "±");
+	lv_obj_set_style_text_font(fs_offset_toggle_label, &font_ui_22_bold, 0);
+	lv_obj_center(fs_offset_toggle_label);
+
+	fs_close_btn =
+		make_icon_btn(fs_header_row, 38, 38, &icon_collapse, fs_collapse_to_integrated_cb, NULL, &fs_close_icon);
+	lv_obj_set_ext_click_area(fs_close_btn, 6);
+
+	// Collapsible Synchronization Offset Strip
+	fs_offset_bar = lv_obj_create(fullscreen_lyrics_box);
+	style_clean_box(fs_offset_bar);
+	lv_obj_set_ignore_layout(fs_offset_bar, true);
+	lv_obj_set_style_radius(fs_offset_bar, 12, 0);
+	lv_obj_set_style_bg_opa(fs_offset_bar, LV_OPA_COVER, 0);
+	lv_obj_set_style_border_width(fs_offset_bar, 1, 0);
+	lv_obj_set_style_border_opa(fs_offset_bar, LV_OPA_COVER, 0);
+	lv_obj_set_style_pad_hor(fs_offset_bar, 10, 0);
+	lv_obj_set_flex_flow(fs_offset_bar, LV_FLEX_FLOW_ROW);
+	lv_obj_set_flex_align(fs_offset_bar, LV_FLEX_ALIGN_SPACE_BETWEEN, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
+	lv_obj_set_hidden(fs_offset_bar, true);
+
+	fs_offset_minus_btn = lv_btn_create(fs_offset_bar);
+	lv_obj_remove_style_all(fs_offset_minus_btn);
+	lv_obj_set_size(fs_offset_minus_btn, 64, 34);
+	lv_obj_set_style_radius(fs_offset_minus_btn, LV_RADIUS_CIRCLE, 0);
+	lv_obj_set_style_bg_color(fs_offset_minus_btn, lv_color_white(), LV_STATE_PRESSED);
+	lv_obj_set_style_bg_opa(fs_offset_minus_btn, LV_OPA_10, LV_STATE_PRESSED);
+	lv_obj_add_event_cb(fs_offset_minus_btn, fs_offset_step_cb, LV_EVENT_CLICKED, (void *)(intptr_t)(-200));
+	lv_obj_t *minus_lbl = lv_label_create(fs_offset_minus_btn);
+	lv_label_set_text(minus_lbl, "-0.2s");
+	lv_obj_set_style_text_font(minus_lbl, &font_ui_14, 0);
+	lv_obj_set_style_text_color(minus_lbl, lv_color_hex(0xF1F5F9), 0);
+	lv_obj_center(minus_lbl);
+
+	fs_offset_value_btn = lv_btn_create(fs_offset_bar);
+	lv_obj_remove_style_all(fs_offset_value_btn);
+	lv_obj_set_size(fs_offset_value_btn, LV_SIZE_CONTENT, 34);
+	lv_obj_set_style_pad_hor(fs_offset_value_btn, 10, 0);
+	lv_obj_add_event_cb(fs_offset_value_btn, fs_offset_step_cb, LV_EVENT_CLICKED, (void *)(intptr_t)0);
+	fs_offset_value_label = lv_label_create(fs_offset_value_btn);
+	lv_label_set_text(fs_offset_value_label, "");
+	lv_obj_set_style_text_font(fs_offset_value_label, &font_ui_14, 0);
+	lv_obj_center(fs_offset_value_label);
+
+	fs_offset_plus_btn = lv_btn_create(fs_offset_bar);
+	lv_obj_remove_style_all(fs_offset_plus_btn);
+	lv_obj_set_size(fs_offset_plus_btn, 64, 34);
+	lv_obj_set_style_radius(fs_offset_plus_btn, LV_RADIUS_CIRCLE, 0);
+	lv_obj_set_style_bg_color(fs_offset_plus_btn, lv_color_white(), LV_STATE_PRESSED);
+	lv_obj_set_style_bg_opa(fs_offset_plus_btn, LV_OPA_10, LV_STATE_PRESSED);
+	lv_obj_add_event_cb(fs_offset_plus_btn, fs_offset_step_cb, LV_EVENT_CLICKED, (void *)(intptr_t)(+200));
+	lv_obj_t *plus_lbl = lv_label_create(fs_offset_plus_btn);
+	lv_label_set_text(plus_lbl, "+0.2s");
+	lv_obj_set_style_text_font(plus_lbl, &font_ui_14, 0);
+	lv_obj_set_style_text_color(plus_lbl, lv_color_hex(0xF1F5F9), 0);
+	lv_obj_center(plus_lbl);
+
+	fs_offset_search_btn =
+		make_icon_btn(fs_offset_bar, 36, 34, &icon_lyrics_search, lyrics_find_btn_cb, NULL, &fs_offset_search_icon);
+
+	fs_stage_area = lv_obj_create(fullscreen_lyrics_box);
+	style_clean_box(fs_stage_area);
+	lv_obj_set_ignore_layout(fs_stage_area, true);
+	lv_obj_set_style_clip_corner(fs_stage_area, true, 0);
+
+	// Mode B Compact Bottom Deck
+	fs_bottom_deck = lv_obj_create(fullscreen_lyrics_box);
+	style_clean_box(fs_bottom_deck);
+	lv_obj_set_ignore_layout(fs_bottom_deck, true);
+	lv_obj_set_flex_flow(fs_bottom_deck, LV_FLEX_FLOW_COLUMN);
+	lv_obj_set_flex_align(fs_bottom_deck, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
+	lv_obj_set_style_pad_row(fs_bottom_deck, 6, 0);
+
+	fs_slider = lv_slider_create(fs_bottom_deck);
+	lv_obj_set_size(fs_slider, lv_pct(100), 4);
+	lv_slider_set_range(fs_slider, 0, 1000);
+	lv_obj_set_ext_click_area(fs_slider, 12);
+	lv_obj_set_style_radius(fs_slider, LV_RADIUS_CIRCLE, LV_PART_MAIN);
+	lv_obj_set_style_radius(fs_slider, LV_RADIUS_CIRCLE, LV_PART_INDICATOR);
+	lv_obj_set_style_radius(fs_slider, LV_RADIUS_CIRCLE, LV_PART_KNOB);
+	lv_obj_set_style_pad_all(fs_slider, 4, LV_PART_KNOB);
+	lv_obj_set_style_border_width(fs_slider, 0, LV_PART_KNOB);
+	lv_obj_set_style_shadow_width(fs_slider, 0, LV_PART_KNOB);
+	lv_obj_add_event_cb(fs_slider, seek_slider_event_cb, LV_EVENT_ALL, NULL);
+
+	lv_obj_t *fs_clocks = lv_obj_create(fs_bottom_deck);
+	style_clean_box(fs_clocks);
+	lv_obj_set_size(fs_clocks, lv_pct(100), 18);
+
+	fs_elapsed_label = lv_label_create(fs_clocks);
+	lv_label_set_text(fs_elapsed_label, "0:00");
+	lv_obj_set_style_text_font(fs_elapsed_label, &font_ui_14, 0);
+	lv_obj_align(fs_elapsed_label, LV_ALIGN_LEFT_MID, 0, 0);
+
+	fs_duration_label = lv_label_create(fs_clocks);
+	lv_label_set_text(fs_duration_label, "0:00");
+	lv_obj_set_style_text_font(fs_duration_label, &font_ui_14, 0);
+	lv_obj_align(fs_duration_label, LV_ALIGN_RIGHT_MID, 0, 0);
+
+	lv_obj_t *fs_transport = lv_obj_create(fs_bottom_deck);
+	style_clean_box(fs_transport);
+	lv_obj_set_size(fs_transport, lv_pct(100), 66);
+
+	fs_prev_btn = make_icon_btn(fs_transport, 50, 50, &icon_skip_back, prev_btn_event_cb, NULL, &fs_prev_icon);
+	lv_obj_align(fs_prev_btn, LV_ALIGN_CENTER, -76, 0);
+
+	fs_play_btn = lv_btn_create(fs_transport);
+	lv_obj_remove_style_all(fs_play_btn);
+	lv_obj_set_size(fs_play_btn, 60, 60);
+	lv_obj_align(fs_play_btn, LV_ALIGN_CENTER, 0, 0);
+	lv_obj_set_style_radius(fs_play_btn, LV_RADIUS_CIRCLE, 0);
+	lv_obj_set_style_bg_opa(fs_play_btn, LV_OPA_COVER, 0);
+	lv_obj_set_style_opa(fs_play_btn, LV_OPA_40, LV_STATE_DISABLED);
+	lv_obj_add_event_cb(fs_play_btn, play_btn_event_cb, LV_EVENT_CLICKED, NULL);
+	fs_play_icon = lv_image_create(fs_play_btn);
+	lv_image_set_src(fs_play_icon, &icon_play);
+	lv_obj_center(fs_play_icon);
+	lv_obj_set_clickable(fs_play_icon, false);
+	lv_obj_set_event_bubble(fs_play_icon, true);
+
+	fs_next_btn = make_icon_btn(fs_transport, 50, 50, &icon_skip_forward, next_btn_event_cb, NULL, &fs_next_icon);
+	lv_obj_align(fs_next_btn, LV_ALIGN_CENTER, 76, 0);
+
+	// Invisible top edge strip for Control Centre pull-down when status bar is hidden
 	lv_obj_t *panel_edge = lv_obj_create(player_screen);
-	lv_obj_remove_style_all(panel_edge);
-	lv_obj_set_size(panel_edge, cfg->screen_width, cfg->top_bar_height);
+	style_clean_box(panel_edge);
+	lv_obj_set_ignore_layout(panel_edge, true);
+	lv_obj_set_size(panel_edge, screen_w, bar_height);
 	lv_obj_set_pos(panel_edge, 0, 0);
-	lv_obj_set_scrollable(panel_edge, false);
 	lv_obj_set_clickable(panel_edge, true);
 	lv_obj_add_event_cb(panel_edge, panel_edge_drag_cb, LV_EVENT_PRESSED, NULL);
 	lv_obj_add_event_cb(panel_edge, panel_edge_drag_cb, LV_EVENT_PRESSING, NULL);
@@ -5685,26 +4848,24 @@ void player_init(gui_config_t *cfg) {
 	lv_obj_add_event_cb(panel_edge, panel_edge_drag_cb, LV_EVENT_PRESS_LOST, NULL);
 	lv_obj_move_foreground(panel_edge);
 
-	// The backdrop over a loaded cover is always the dark treatment -- same
-	// look in both themes; only the no-cover panel follows the theme.
-	cover_set_backdrop_light(false);
+	// Timers & Observers
+	smooth_timer = lv_timer_create(smooth_timer_cb, SMOOTH_PERIOD_MS, NULL);
+	lv_timer_pause(smooth_timer);
 
-	// The status bar over the player, as it was left.
-	bar_height = (int)cfg->top_bar_height;
-	player_set_statusbar_always(config_get_int("screen", "statusbar_always", 0) != 0);
+	progress_slider_timer = lv_timer_create(progress_slider_timer_cb, POLL_PERIOD_IDLE_MS, NULL);
+	audio_set_completion_hook(track_end_hook);
+	power_slow_in_standby(progress_slider_timer, POLL_PERIOD_PLAYING_MS);
 
-	// Whichever arrangement was left selected, now that every widget it moves
-	// exists.
-	int saved = (int)config_get_int("screen", "player_layout_alt", 0);
-	layout_choice = (saved == (int)PLAYER_LAYOUT_ALTERNATIVE)	? PLAYER_LAYOUT_ALTERNATIVE
-					: (saved == (int)PLAYER_LAYOUT_STUDIO)		? PLAYER_LAYOUT_STUDIO
-																: PLAYER_LAYOUT_STANDARD;
-	cover_accent = config_get_bool("screen", "cover_accent", false);
-	layout_alt_now = false; // apply_layout() below puts the standard one up first
-	layout_studio_now = false;
-	apply_layout();
+	sleep_timer = lv_timer_create(sleep_timer_cb, 1000, NULL);
+	lv_timer_pause(sleep_timer);
+	power_slow_in_standby(sleep_timer, 5000);
 
+	device_state_register_queue_cb(upnext_refresh);
 	theme_register_refresh(player_refresh_theme);
+	fonts_register_change(player_on_font_change);
+
+	update_fs_offset_labels();
+	relayout_screen_vertical();
+	apply_palette_to_widgets();
+	apply_playback_status(AUDIO_STATUS_STOPPED);
 }
-
-

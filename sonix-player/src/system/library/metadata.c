@@ -10,6 +10,8 @@
 #include "src/system/core/utils.h"
 
 #include <ctype.h>
+#include <errno.h>
+#include <pthread.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -2546,6 +2548,72 @@ void metadata_read(const char *filepath, song_metadata_t *out) {
 
 	read_sidecar_tags(filepath, out);
 	clean_fields(out);
+}
+
+// Three adjacent previews at most. A playback cache hit must include every
+// tag, including ReplayGain. Sidecar-tagged streams and virtual CUE paths
+// stay on the ordinary reader since their metadata has another source.
+typedef struct {
+	char path[512];
+	struct stat file;
+	song_metadata_t meta;
+} preview_entry_t;
+
+static preview_entry_t previews[3];
+static unsigned preview_slot;
+static pthread_mutex_t preview_lock = PTHREAD_MUTEX_INITIALIZER;
+
+static bool preview_file(const char *path, struct stat *file) {
+	char sidecar[600];
+	if (strlen(path) >= sizeof(previews[0].path) || stat(path, file) != 0 || !S_ISREG(file->st_mode)) return false;
+	snprintf(sidecar, sizeof(sidecar), "%s.tags", path);
+	struct stat extra;
+	return stat(sidecar, &extra) != 0 && errno == ENOENT;
+}
+
+static bool same_preview_file(const struct stat *a, const struct stat *b) {
+	return a->st_dev == b->st_dev && a->st_ino == b->st_ino && a->st_size == b->st_size &&
+		   a->st_ctime == b->st_ctime && a->st_mtime == b->st_mtime
+#ifdef __APPLE__
+		   && a->st_ctimespec.tv_nsec == b->st_ctimespec.tv_nsec && a->st_mtimespec.tv_nsec == b->st_mtimespec.tv_nsec
+#else
+		   && a->st_ctim.tv_nsec == b->st_ctim.tv_nsec && a->st_mtim.tv_nsec == b->st_mtim.tv_nsec
+#endif
+		;
+}
+
+static bool preview_lookup(const char *path, const struct stat *file, song_metadata_t *out) {
+	bool found = false;
+	pthread_mutex_lock(&preview_lock);
+	for (unsigned i = 0; i < 3; i++) {
+		if (!strcmp(previews[i].path, path) && same_preview_file(&previews[i].file, file)) {
+			*out = previews[i].meta;
+			found = true;
+			break;
+		}
+	}
+	pthread_mutex_unlock(&preview_lock);
+	return found;
+}
+
+void metadata_read_for_preview(const char *path, song_metadata_t *out) {
+	struct stat before, after;
+	bool cacheable = preview_file(path, &before);
+	if (cacheable && preview_lookup(path, &before, out)) return;
+	metadata_read(path, out);
+	if (!cacheable || !preview_file(path, &after) || !same_preview_file(&before, &after)) return;
+	pthread_mutex_lock(&preview_lock);
+	preview_entry_t *entry = &previews[preview_slot];
+	preview_slot = (preview_slot + 1) % 3;
+	snprintf(entry->path, sizeof(entry->path), "%s", path);
+	entry->file = before;
+	entry->meta = *out;
+	pthread_mutex_unlock(&preview_lock);
+}
+
+void metadata_read_for_playback(const char *path, song_metadata_t *out) {
+	struct stat file;
+	if (!preview_file(path, &file) || !preview_lookup(path, &file, out)) metadata_read(path, out);
 }
 
 char *metadata_read_lyrics(const char *filepath) {

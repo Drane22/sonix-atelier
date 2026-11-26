@@ -63,10 +63,39 @@ typedef enum {
 player_layout_t player_layout_get(void);
 void player_layout_set(player_layout_t layout);
 
-// Whether the Standard and Studio arrangements take the sleeve's colour as
-// their accent, as Waveform always does. Off by default; saved in the config.
+// Whether Now Playing uses Adaptive album-derived colours (true, default in
+// Sonix Atelier Ambient Edition) or Fixed theme accent colours (false).
 bool player_cover_accent(void);
 void player_cover_accent_set(bool on);
+
+// Current resolved accent colour on Now Playing (adaptive or fixed).
+lv_color_t player_active_accent(void);
+
+// Lyrics presentation & synchronization preferences, persisted in [lyrics].
+typedef enum {
+	PLAYER_LYRICS_INTEGRATED = 0,
+	PLAYER_LYRICS_FULLSCREEN = 1,
+} player_lyrics_mode_t;
+
+typedef enum {
+	PLAYER_LYRICS_TEXT_SMALL = 0,
+	PLAYER_LYRICS_TEXT_MEDIUM = 1,
+	PLAYER_LYRICS_TEXT_LARGE = 2,
+} player_lyrics_text_size_t;
+
+player_lyrics_mode_t player_lyrics_default_mode(void);
+void player_lyrics_set_default_mode(player_lyrics_mode_t mode);
+
+bool player_lyrics_remember_mode(void);
+void player_lyrics_set_remember_mode(bool on);
+
+player_lyrics_text_size_t player_lyrics_text_size(void);
+void player_lyrics_set_text_size(player_lyrics_text_size_t size);
+
+// Synchronization offset in milliseconds (-5000 .. +5000, step 100 ms).
+// Positive values show lyrics earlier; negative values delay lyrics.
+int player_lyrics_offset_ms(void);
+void player_lyrics_set_offset_ms(int offset_ms);
 
 // The output the music was going to has just been unplugged -- a jack pulled
 // out, a USB-C DAC removed, headphones that walked out of range. Pauses, so
@@ -159,5 +188,9 @@ bool player_cover_copy(int size, cover_image_t *out, uint64_t *id);
 void player_set_statusbar_always(bool on);
 bool player_statusbar_always(void);
 
+// Observer callback invoked on the GUI thread when playback status, track
+// metadata, or decoded artwork updates.
+typedef void (*player_state_cb_t)(void);
+void player_register_state_cb(player_state_cb_t cb);
 
 #endif

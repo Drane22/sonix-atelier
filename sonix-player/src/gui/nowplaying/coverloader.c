@@ -90,7 +90,15 @@ static bool id_on_worker;
 static bool started;
 
 // Picks up the next slot waiting to be decoded. Called with the lock held.
+// Prioritize Now Playing's adjacent carousel slots ahead of background lists.
 static int next_pending(void) {
+	static const int PRIORITY[] = {COVERLOADER_CAROUSEL_NEXT, COVERLOADER_CAROUSEL_PREV};
+	for (size_t k = 0; k < sizeof(PRIORITY) / sizeof(PRIORITY[0]); k++) {
+		int idx = PRIORITY[k];
+		if (idx >= 0 && idx < COVERLOADER_SLOTS && slots[idx].pending && !slots[idx].running) {
+			return idx;
+		}
+	}
 	for (int i = 0; i < COVERLOADER_SLOTS; i++) {
 		if (slots[i].pending && !slots[i].running) {
 			return i;
@@ -252,8 +260,14 @@ static void *worker(void *arg) {
 		pthread_mutex_unlock(&lock);
 
 		cover_image_t image;
-		bool found = share_w > 0 ? cover_load_shared(path, share_w, share_h, size, &image)
-								  : cover_thumb_load(path, false, size, &image);
+		bool found;
+		if (share_w < 0) {
+			found = cover_load_carousel(path, -share_w, share_h, size, &image);
+		} else if (share_w > 0) {
+			found = cover_load_shared(path, share_w, share_h, size, &image);
+		} else {
+			found = cover_thumb_load(path, false, size, &image);
+		}
 
 		pthread_mutex_lock(&lock);
 		slot->running = false;
@@ -385,6 +399,26 @@ void coverloader_request_shared(int slot_index, const char *path, int size, int 
 	pthread_mutex_unlock(&lock);
 }
 
+void coverloader_request_carousel(int slot_index, const char *path, int preview_box, int player_w, int player_h) {
+	if (slot_index < 0 || slot_index >= COVERLOADER_SLOTS || !path || player_w <= 0 || player_h <= 0) {
+		return;
+	}
+
+	pthread_mutex_lock(&lock);
+
+	slot_t *slot = &slots[slot_index];
+	discard(slot);
+
+	snprintf(slot->path, sizeof(slot->path), "%s", path);
+	slot->size = preview_box;
+	slot->share_w = -player_w; // negative marks aspect-preserving carousel decode
+	slot->share_h = player_h;
+	slot->pending = true;
+
+	pthread_cond_signal(&wakeup);
+	pthread_mutex_unlock(&lock);
+}
+
 void coverloader_release(int slot_index) {
 	if (slot_index < 0 || slot_index >= COVERLOADER_SLOTS) {
 		return;
@@ -403,6 +437,7 @@ bool coverloader_take(int slot_index, cover_image_t *out, bool *finished) {
 	if (slot_index < 0 || slot_index >= COVERLOADER_SLOTS || !out) {
 		return false;
 	}
+	memset(out, 0, sizeof(*out));
 
 	pthread_mutex_lock(&lock);
 	slot_t *slot = &slots[slot_index];
@@ -476,6 +511,8 @@ static bool dual_take(dual_job_t *job, cover_image_t *first, cover_image_t *seco
 	if (!first || !second) {
 		return false;
 	}
+	memset(first, 0, sizeof(*first));
+	memset(second, 0, sizeof(*second));
 
 	pthread_mutex_lock(&lock);
 

@@ -43,6 +43,7 @@ void cover_cache_reopen_if_replaced(void);
 typedef enum {
 	COVER_FIT_CONTAIN, // whole picture visible, letterboxed, never upscaled
 	COVER_FIT_COVER,   // fills the box edge to edge, centre-cropping the rest
+	COVER_FIT_PLAYER,  // whole picture visible at exact aspect ratio, upscale capped at 1.6x
 } cover_fit_t;
 
 // Decodes the cover art of a track (embedded picture first, then a cover file
@@ -169,6 +170,11 @@ uint32_t cover_tone_stretched(uint32_t tone);
 // size and kept there, so the player finds it the first time the record plays.
 // What an album's page puts at its head. Runs on the loader thread.
 bool cover_load_shared(const char *filepath, int player_w, int player_h, int size, cover_image_t *out);
+
+// Adjacent Now Playing carousel cover: shares/warms the player_covers table at
+// player_w x player_h and scales into preview_box preserving aspect ratio
+// (COVER_FIT_PLAYER) and colour metadata. Loader thread only.
+bool cover_load_carousel(const char *filepath, int player_w, int player_h, int preview_box, cover_image_t *out);
 
 // A copy of `src` scaled to fill a square of `size`, with its colour kept. For
 // a picture already on screen that another page wants smaller, on the spot:

@@ -53,6 +53,9 @@ typedef struct {
 // into two shelves.
 void metadata_read(const char *filepath, song_metadata_t *out);
 
+void metadata_read_for_preview(const char *path, song_metadata_t *out);
+void metadata_read_for_playback(const char *path, song_metadata_t *out);
+
 // The artist to show for the track. By default the album's artist when the
 // tags have one, since that is the name the record is filed under -- except on
 // a compilation, where the album is credited to "Various Artists" or the like

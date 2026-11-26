@@ -244,39 +244,66 @@ static char *trim(char *s) {
 }
 
 typedef struct {
-	lyrics_line_t line;
+	int32_t ms;
+	size_t off;
+	size_t len;
 	int order;
-} sortable_t;
+} raw_line_t;
 
 static int by_time(const void *a, const void *b) {
-	const sortable_t *x = a, *y = b;
-	if (x->line.ms != y->line.ms) {
-		return x->line.ms < y->line.ms ? -1 : 1;
+	const raw_line_t *x = a, *y = b;
+	if (x->ms != y->ms) {
+		return x->ms < y->ms ? -1 : 1;
 	}
 	return x->order - y->order;
 }
 
-static bool add_line(sortable_t **lines, int *count, int *cap, int32_t ms, const char *text) {
+static bool arena_push(char **arena, size_t *used, size_t *cap, const char *s, size_t len, size_t *off_out) {
+	size_t need = *used + len + 1;
+	if (need > *cap) {
+		size_t grown = *cap ? *cap * 2 : 1024;
+		while (grown < need) {
+			grown *= 2;
+		}
+		char *bigger = realloc(*arena, grown);
+		if (!bigger) {
+			return false;
+		}
+		*arena = bigger;
+		*cap = grown;
+	}
+	*off_out = *used;
+	if (len > 0) {
+		memcpy(*arena + *used, s, len);
+	}
+	(*arena)[*used + len] = '\0';
+	*used += len + 1;
+	return true;
+}
+
+static bool add_line(raw_line_t **lines, int *count, int *cap, int32_t ms, size_t off, size_t len) {
 	if (*count >= LYRICS_LINES_MAX) {
 		return false;
 	}
 	if (*count == *cap) {
 		int grown = *cap ? *cap * 2 : 64;
-		sortable_t *bigger = realloc(*lines, (size_t)grown * sizeof(*bigger));
+		raw_line_t *bigger = realloc(*lines, (size_t)grown * sizeof(*bigger));
 		if (!bigger) {
 			return false;
 		}
 		*lines = bigger;
 		*cap = grown;
 	}
-	(*lines)[*count].line.ms = ms;
-	(*lines)[*count].line.text = text;
+	(*lines)[*count].ms = ms;
+	(*lines)[*count].off = off;
+	(*lines)[*count].len = len;
 	(*lines)[*count].order = *count;
 	(*count)++;
 	return true;
 }
 
-// Splits `text` (kept as the arena) into lines.
+// Splits `text` into lines, supporting repeated [mm:ss.xx] stamps, [offset:],
+// instrumental breaks, and multi-line continuation entries in synced LRC/SYLT.
 static bool parse(char *text, lyrics_t *out) {
 	bool synced = false;
 	for (char *p = text; *p;) {
@@ -295,11 +322,21 @@ static bool parse(char *text, lyrics_t *out) {
 		}
 	}
 
-	sortable_t *lines = NULL;
+	raw_line_t *lines = NULL;
 	int count = 0;
 	int cap = 0;
+	char *pool = NULL;
+	size_t pool_used = 0;
+	size_t pool_cap = strlen(text) + 64;
+	pool = malloc(pool_cap);
+	if (!pool) {
+		return false;
+	}
+
 	int32_t offset = 0;
 	bool blank_pending = false;
+	int last_batch_start = -1;
+	int last_batch_count = 0;
 
 	char *p = text;
 	while (p && *p) {
@@ -339,8 +376,46 @@ static bool parse(char *text, lyrics_t *out) {
 		strip_word_stamps(line);
 
 		if (synced) {
-			for (int i = 0; i < time_count; i++) {
-				add_line(&lines, &count, &cap, times[i], line);
+			if (time_count > 0) {
+				size_t off = 0;
+				size_t len = strlen(line);
+				if (arena_push(&pool, &pool_used, &pool_cap, line, len, &off)) {
+					last_batch_start = count;
+					last_batch_count = 0;
+					for (int i = 0; i < time_count; i++) {
+						if (add_line(&lines, &count, &cap, times[i], off, len)) {
+							last_batch_count++;
+						}
+					}
+				}
+			} else if (!header && line[0] && last_batch_count > 0 && last_batch_start >= 0) {
+				// Multi-line continuation directly under a timestamped line:
+				// append "\n<line>" so every stamp from that batch carries both lines.
+				size_t prev_off = lines[last_batch_start].off;
+				size_t prev_len = lines[last_batch_start].len;
+				size_t add_len = strlen(line);
+				size_t new_len = prev_len ? (prev_len + 1 + add_len) : add_len;
+				char *combined = malloc(new_len + 1);
+				if (combined) {
+					if (prev_len > 0) {
+						memcpy(combined, pool + prev_off, prev_len);
+						combined[prev_len] = '\n';
+						memcpy(combined + prev_len + 1, line, add_len);
+					} else {
+						memcpy(combined, line, add_len);
+					}
+					combined[new_len] = '\0';
+					size_t new_off = 0;
+					if (arena_push(&pool, &pool_used, &pool_cap, combined, new_len, &new_off)) {
+						for (int i = 0; i < last_batch_count; i++) {
+							lines[last_batch_start + i].off = new_off;
+							lines[last_batch_start + i].len = new_len;
+						}
+					}
+					free(combined);
+				}
+			} else if (!line[0] || header) {
+				last_batch_count = 0;
 			}
 		} else if (!header || line[0]) {
 			// Untimed: kept as written, one empty line between verses at most,
@@ -349,26 +424,34 @@ static bool parse(char *text, lyrics_t *out) {
 				blank_pending = count > 0;
 			} else {
 				if (blank_pending) {
-					add_line(&lines, &count, &cap, -1, "");
+					size_t empty_off = 0;
+					if (arena_push(&pool, &pool_used, &pool_cap, "", 0, &empty_off)) {
+						add_line(&lines, &count, &cap, -1, empty_off, 0);
+					}
 					blank_pending = false;
 				}
-				add_line(&lines, &count, &cap, -1, line);
+				size_t off = 0;
+				size_t len = strlen(line);
+				if (arena_push(&pool, &pool_used, &pool_cap, line, len, &off)) {
+					add_line(&lines, &count, &cap, -1, off, len);
+				}
 			}
 		}
 		p = next;
 	}
 
-	if (count == 0) {
+	if (count <= 0) {
 		free(lines);
+		free(pool);
 		return false;
 	}
 
 	if (synced) {
 		qsort(lines, (size_t)count, sizeof(*lines), by_time);
 		for (int i = 0; i < count; i++) {
-			lines[i].line.ms -= offset; // a positive offset shows the words sooner
-			if (lines[i].line.ms < 0) {
-				lines[i].line.ms = 0;
+			lines[i].ms -= offset; // a positive offset shows the words sooner
+			if (lines[i].ms < 0) {
+				lines[i].ms = 0;
 			}
 		}
 	}
@@ -376,10 +459,14 @@ static bool parse(char *text, lyrics_t *out) {
 	out->lines = malloc((size_t)count * sizeof(*out->lines));
 	if (!out->lines) {
 		free(lines);
+		free(pool);
 		return false;
 	}
+	free(out->arena);
+	out->arena = pool;
 	for (int i = 0; i < count; i++) {
-		out->lines[i] = lines[i].line;
+		out->lines[i].ms = lines[i].ms;
+		out->lines[i].text = pool + lines[i].off;
 	}
 	free(lines);
 	out->count = count;
